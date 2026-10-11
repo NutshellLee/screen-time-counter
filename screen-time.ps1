@@ -21,6 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'
+$BakPath   = Join-Path $Root 'state.bak.json'
 $LogPath   = Join-Path $Root 'screen-time.log'
 $CatPath   = Join-Path $Root 'categories.json'
 
@@ -32,6 +33,10 @@ function Write-Log([string]$m) {
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+# 查鼠标左键此刻是不是按着：用来判断「点到面板外面了」
+Add-Type -Namespace ScreenTimeUi -Name Keys -MemberDefinition @'
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+'@ -ErrorAction SilentlyContinue
 
 $csSource = @'
 using System;
@@ -96,6 +101,27 @@ public class ScreenTimeWatch : NativeWindow
             return n;
         }
         catch { return "(未知)"; }
+    }
+
+    // 最前面那个窗口的窗口类名。
+    // explorer.exe 既管桌面/任务栏、也管文件夹窗口，靠类名把这两件事分开：
+    //   CabinetWClass / ExploreWClass   = 真的在开文件夹
+    //   Progman / WorkerW / Shell_TrayWnd = 桌面、任务栏，不算「在用某个程序」
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder buf, int nMaxCount);
+
+    public static string ForegroundClass()
+    {
+        try
+        {
+            IntPtr h = GetForegroundWindow();
+            if (h == IntPtr.Zero) return "";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(256);
+            int n = GetClassName(h, sb, sb.Capacity);
+            if (n <= 0) return "";
+            return sb.ToString();
+        }
+        catch { return ""; }
     }
 
     // 最前面那个窗口属于哪个进程，用来排除本工具自己
@@ -219,12 +245,119 @@ function Test-FunApp([string]$name) {
   return $false
 }
 
+# 「不记」名单：默认空着。真正管用的是下面那条「是不是我拉起来的」判断。
+# 名单留着是给你自己用——想把某个程序彻底排除，就往 categories.json 的「不记」里加。
+$script:SkipAppsDefault = @()
+function Get-SkipApps {
+  try {
+    if (Test-Path $CatPath) {
+      $j = Get-Content $CatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($j.PSObject.Properties['不记']) {
+        return @($j.'不记' | Where-Object { $_ })
+      }
+    }
+  } catch { Write-Log "categories.json 的「不记」读不了：$($_.Exception.Message)" }
+  return $script:SkipAppsDefault
+}
+function Test-SkipApp([string]$name) {
+  if (-not $name) { return $true }
+  foreach ($a in $script:SkipApps) { if ($name -ieq $a) { return $true } }
+  return $false
+}
+
+# 「宿主」：我自己（AI）就是被这个程序拉起来的。
+# 判断某个前台窗口是谁开的，靠顺着父进程往上找：
+#   先碰到宿主  -> 是我操作的，不记
+#   先碰到 explorer -> 是你自己点开的，照记
+# 这样「你手动开的 PowerShell」和「我跑命令拉起来的 PowerShell」就分开了。
+$script:HostAppsDefault = @('DSH NEXT')
+function Get-HostApps {
+  try {
+    if (Test-Path $CatPath) {
+      $j = Get-Content $CatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($j.PSObject.Properties['宿主']) {
+        $list = @($j.'宿主' | Where-Object { $_ })
+        if ($list.Count -gt 0) { return $list }
+      }
+    }
+  } catch { Write-Log "categories.json 的「宿主」读不了，用默认：$($_.Exception.Message)" }
+  return $script:HostAppsDefault
+}
+
+function Test-AgentSpawned([int]$targetPid) {
+  if ($targetPid -le 0) { return $false }
+  try {
+    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -ErrorAction Stop)
+    $map = @{}
+    foreach ($p in $all) { $map[[int]$p.ProcessId] = $p }
+    $cur = $targetPid
+    for ($i = 0; $i -lt 10; $i++) {
+      if (-not $map.ContainsKey($cur)) { break }
+      $parentId = [int]$map[$cur].ParentProcessId
+      if ($parentId -le 0 -or -not $map.ContainsKey($parentId)) { break }
+      $pname = [string]$map[$parentId].Name
+      $base = $pname -replace '\.exe$', ''
+      foreach ($h in $script:HostApps) { if ($base -ieq $h) { return $true } }
+      if ($base -ieq 'explorer') { return $false }
+      $cur = $parentId
+    }
+  } catch {}
+  return $false
+}
+
+# 能不能证明「这个窗口是你自己点开的」：父进程链里能走到 explorer 就算。
+# 我自己跑命令拉起来的进程活得短，父进程一退出链就断了，断链的一律当作不算。
+function Test-UserLaunched([int]$targetPid) {
+  if ($targetPid -le 0) { return $false }
+  try {
+    $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -ErrorAction Stop)
+    $map = @{}
+    foreach ($p in $all) { $map[[int]$p.ProcessId] = $p }
+    $cur = $targetPid
+    for ($i = 0; $i -lt 10; $i++) {
+      if (-not $map.ContainsKey($cur)) { return $false }
+      $parentId = [int]$map[$cur].ParentProcessId
+      if ($parentId -le 0 -or -not $map.ContainsKey($parentId)) { return $false }
+      $base = ([string]$map[$parentId].Name) -replace '\.exe$', ''
+      if ($base -ieq 'explorer') { return $true }
+      $cur = $parentId
+    }
+  } catch {}
+  return $false
+}
+
+# 控制台那类窗口（powershell / cmd / 终端）：多半是脚本或自动化拉起来的。
+# 只有能证明是你自己开的时候才记。
+$script:ConsoleApps = @('powershell', 'pwsh', 'cmd', 'conhost', 'OpenConsole', 'WindowsTerminal', 'wscript', 'cscript')
+
+# 这个前台窗口到底该不该记。集中在这里判断，别在几个调用点各写一套。
+function Test-ShouldSkipApp([int]$fgPid, [string]$name) {
+  if ($fgPid -le 0) { return $true }
+  if ($fgPid -eq $PID) { return $true }                 # 本工具自己
+  if (-not $name) { return $true }
+  if (Test-SkipApp $name) { return $true }               # 用户明确排除的
+  if (Test-AgentSpawned $fgPid) { return $true }         # 我（AI）拉起来的
+  # explorer：点桌面、点任务栏不算，只有文件夹窗口才算
+  if ($name -ieq 'explorer') {
+    $cls = [ScreenTimeWatch]::ForegroundClass()
+    if ($cls -ne 'CabinetWClass' -and $cls -ne 'ExploreWClass') { return $true }
+    return $false
+  }
+  foreach ($a in $script:ConsoleApps) {
+    if ($name -ieq $a) { return (-not (Test-UserLaunched $fgPid)) }
+  }
+  return $false
+}
+
 # 某一天按程序分的行（含正在进行的那个程序）
 function Get-DayAppRows($state, $d) {
   $k = Get-DayKey $d
   $rows = @()
   if ($state.days.PSObject.Properties[$k] -and $state.days.$k.PSObject.Properties['apps']) {
-    foreach ($p in @($state.days.$k.apps.PSObject.Properties)) { $rows += [pscustomobject]@{ n = $p.Name; v = [int64]$p.Value } }
+    foreach ($p in @($state.days.$k.apps.PSObject.Properties)) {
+      if (Test-SkipApp $p.Name) { continue }   # 控制台那类不显示
+      $rows += [pscustomobject]@{ n = $p.Name; v = [int64]$p.Value }
+    }
   }
   if ($script:AppStart -and $script:AppName -and (Get-DayKey $script:AppStart) -eq $k) {
     $live = [int][Math]::Round((New-TimeSpan -Start $script:AppStart -End (Get-Date)).TotalSeconds)
@@ -265,7 +398,13 @@ function Load-State {
     if (-not $s.PSObject.Properties['current']) { $s | Add-Member -NotePropertyName current -NotePropertyValue $null }
     if (-not $s.PSObject.Properties['lastTick']){ $s | Add-Member -NotePropertyName lastTick -NotePropertyValue $null }
     return $s
-  } catch { Write-Log "state.json 读不了，重新开始：$($_.Exception.Message)"; return $null }
+  } catch {
+    # 读不出来（被写到一半、被截断）**不等于**第一次运行：留一份残骸再重新开始
+    $bad = "$StatePath.corrupt-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+    try { Move-Item -Path $StatePath -Destination $bad -Force } catch {}
+    Write-Log "state.json 读不了，先留成 $(Split-Path $bad -Leaf) 再重新开始：$($_.Exception.Message)"
+    return $null
+  }
 }
 
 function Save-State($s) {
@@ -307,9 +446,12 @@ function Add-AppSeconds($state, [datetime]$at, [string]$name, [int]$sec) {
 # 换了就结算上一段，这样时间才能归到具体应用上
 function Start-AppSlice($state, [datetime]$at) {
   if (-not $state.current) { return }
-  # 本工具自己抢到前台时不算（比如脚本自己的窗口），保持上一个归属
-  if ([ScreenTimeWatch]::ForegroundPid() -eq $PID) { return }
-  $script:AppName  = [ScreenTimeWatch]::ForegroundApp()
+  $fpid = [ScreenTimeWatch]::ForegroundPid()
+  $fg = [ScreenTimeWatch]::ForegroundApp()
+  # 该不该记，统一由 Test-ShouldSkipApp 判断：
+  # 本工具自己的窗口、我（AI）拉起来的、点桌面/任务栏、证明不了是你开的控制台，都不记
+  if (Test-ShouldSkipApp $fpid $fg) { return }
+  $script:AppName  = $fg
   $script:AppStart = $at
 }
 
@@ -522,7 +664,9 @@ function Get-RangeApps($state, [datetime]$endDay, [int]$days) {
 function Format-HM([int]$sec) {
   if ($sec -le 0) { return '0 秒' }
   if ($sec -lt 60) { return "$sec 秒" }
-  $h = [int]($sec / 3600); $m = [int](($sec % 3600) / 60)
+  # 必须向下取整：以前写的是 [int]($sec / 3600)，那是四舍五入，
+  # 5 小时 50 分会显示成「6 小时 50 分」——分钟一到 30 就多算一小时。
+  $h = [int][math]::Floor($sec / 3600); $m = [int][math]::Floor(($sec % 3600) / 60)
   if ($h -gt 0 -and $m -gt 0) { return "$h 小时 $m 分" }
   if ($h -gt 0) { return "$h 小时" }
   return "$m 分"
@@ -559,7 +703,8 @@ function New-TimeIcon([int]$sec) {
   $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
   $g.Clear([System.Drawing.Color]::Transparent)
   $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 200, 110, 0))), 0, 0, 31, 31)
-  $h = [int]($sec / 3600); $m = [int](($sec % 3600) / 60)
+  # 同样要向下取整，不然图标上的小时数也会多算一小时
+  $h = [int][math]::Floor($sec / 3600); $m = [int][math]::Floor(($sec % 3600) / 60)
   $txt = "${h}:$($m.ToString('00'))"
   $size = switch ($txt.Length) { 1 {16} 2 {15} 3 {13} 4 {11} 5 {9} default {8} }
   $font = New-Object System.Drawing.Font 'Segoe UI', $size, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
@@ -704,6 +849,7 @@ $script:UiMuted = [System.Drawing.Color]::FromArgb(255, 138, 147, 158)
 $script:UiWork  = [System.Drawing.Color]::FromArgb(255, 45, 108, 223)
 $script:UiFun   = [System.Drawing.Color]::FromArgb(255, 240, 148, 65)
 $script:UiTrack = [System.Drawing.Color]::FromArgb(255, 232, 236, 241)
+$script:UiHover = [System.Drawing.Color]::FromArgb(255, 240, 148, 65)
 $script:UiLine  = [System.Drawing.Color]::FromArgb(255, 222, 227, 233)
 
 function Get-UiFonts {
@@ -714,6 +860,8 @@ function Get-UiFonts {
     $script:FSub   = New-Object System.Drawing.Font 'Microsoft YaHei UI', 9
     $script:FApp   = New-Object System.Drawing.Font 'Microsoft YaHei UI', 9
     $script:FTiny  = New-Object System.Drawing.Font 'Microsoft YaHei UI', 7.5
+    # 关闭按钮单独一个大字号，原来那个 × 太小
+    $script:FClose = New-Object System.Drawing.Font 'Microsoft YaHei UI', 14, ([System.Drawing.FontStyle]::Regular)
   }
 }
 
@@ -748,6 +896,27 @@ function Get-PanelApps($st, [datetime]$now, [int]$rng) {
     if (-not $found) { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]$live } }
   }
   return @($rows | Sort-Object -Property @{Expression='v';Descending=$true} | Select-Object -First 6)
+}
+
+# 自绘面板必须开双缓冲，不然定时重画时整块会闪一下。
+# DoubleBuffered 是受保护的属性，直接赋值得反射；用 Control.SetStyle 更稳。
+function Set-PanelDoubleBuffer($form) {
+  try {
+    $styles = [int]([System.Windows.Forms.ControlStyles]::UserPaint)
+    $styles = $styles -bor [int]([System.Windows.Forms.ControlStyles]::AllPaintingInWmPaint)
+    $styles = $styles -bor [int]([System.Windows.Forms.ControlStyles]::OptimizedDoubleBuffer)
+    $styles = $styles -bor [int]([System.Windows.Forms.ControlStyles]::Opaque)
+    $m = [System.Windows.Forms.Control].GetMethod('SetStyle', [System.Reflection.BindingFlags]'NonPublic,Instance')
+    [void]$m.Invoke($form, @([System.Windows.Forms.ControlStyles]$styles, $true))
+  } catch { Write-Log "double buffer unavailable: $($_.Exception.Message)" }
+}
+
+# 面板高度按「这一栏实际有几个程序」算：从「今天」切到「近 7 天」，程序条数会变，
+# 高度不跟着变的话，最后一行程序就和底下那排柱子挤在一起了。
+function Get-ScreenPanelHeight($st, [datetime]$now, [int]$rng) {
+  $n = @(Get-PanelApps $st $now $rng).Count
+  if ($n -lt 1) { $n = 1 }
+  return (176 + $n * 24 + 82)
 }
 
 function Draw-Panel($g, [int]$w, [int]$h) {
@@ -792,6 +961,12 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     }
     $tx += [int]$sz.Width + 18
   }
+
+  # 右上角关闭按钮（这个面板里没有现成的 muted 画刷，自己建一个再释放）
+  $bClose = New-Object System.Drawing.SolidBrush $script:UiMuted
+  $g.DrawString('×', $script:FClose, $bClose, ($w - 30), 2)
+  $bClose.Dispose()
+  $script:PanelCloseRect = [pscustomobject]@{ x = ($w - 40); y = 0; w = 36; h = 34 }
 
   # ---- 大字号时长
   $big = (Format-HM $sec)
@@ -865,18 +1040,41 @@ function Draw-Panel($g, [int]$w, [int]$h) {
       $vals += [pscustomobject]@{ d = $dd; v = $v }
       if ($v -gt $maxD) { $maxD = $v }
     }
+    # 鼠标停在哪根柱子上：那根高亮，并在它上方写出日期和时长
+    $hx0 = [int]$script:PanelHoverX
+    $hy0 = [int]$script:PanelHoverY
+    $hotBar = -1
+    if ($hy0 -ge ($h - 58)) {
+      for ($j = 0; $j -lt $vals.Count; $j++) {
+        $bx0 = 16 + $j * $dayW
+        if ($hx0 -ge $bx0 -and $hx0 -lt ($bx0 + $dayW)) { $hotBar = $j; break }
+      }
+    }
     $i = 0
     foreach ($v in $vals) {
       $bx = 16 + $i * $dayW
       $bh2 = [int](28 * $v.v / $maxD)
       if ($bh2 -lt 1 -and $v.v -gt 0) { $bh2 = 1 }
+      $hot = ($hotBar -eq $i)
       $gp = New-RoundRect ($bx + 6) ($baseY + 24 - $bh2) ($dayW - 14) $bh2 3
-      $b = New-Object System.Drawing.SolidBrush $(if ($i -eq 6) { $script:UiWork } else { [System.Drawing.Color]::FromArgb(255, 150, 175, 235) })
+      $bc = if ($hot) { $script:UiHover } elseif ($i -eq 6) { $script:UiWork } else { [System.Drawing.Color]::FromArgb(255, 150, 175, 235) }
+      $b = New-Object System.Drawing.SolidBrush $bc
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
-      $btxt = New-Object System.Drawing.SolidBrush $script:UiMuted
+      $btxt = New-Object System.Drawing.SolidBrush $(if ($hot) { $script:UiText } else { $script:UiMuted })
       $g.DrawString($v.d.ToString('MM-dd'), $script:FTiny, $btxt, ($bx + 2), ($baseY + 26))
       $btxt.Dispose()
       $i++
+    }
+    if ($hotBar -ge 0) {
+      $one = $vals[$hotBar]
+      $htxt = $one.d.ToString('MM-dd') + '  ' + (Format-HM $one.v)
+      $hb = New-Object System.Drawing.SolidBrush $script:UiText
+      $hw = $g.MeasureString($htxt, $script:FTiny).Width
+      $hx = 16 + $hotBar * $dayW + ($dayW - $hw) / 2
+      if ($hx -lt 16) { $hx = 16 }
+      if ($hx + $hw -gt ($w - 8)) { $hx = $w - 8 - $hw }
+      $g.DrawString($htxt, $script:FTiny, $hb, [single]$hx, [single]($baseY - 14))
+      $hb.Dispose()
     }
   } else {
     $d = $now.AddDays(-$rng)
@@ -888,14 +1086,40 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
     $dayStart = $d.Date
     $span = 86400.0
+    # 鼠标停在时间轴上时：高亮压到的那一段，并显示精确的起止时间
+    $hoverX = [int]$script:PanelHoverX
+    $hovering = ($hoverX -ge 16 -and $hoverX -le ($w - 16))
+    $hoverSeg = $null
     foreach ($sg in $segs) {
       $s0 = [datetime]::Parse($sg.s); $e0 = [datetime]::Parse($sg.e)
       $x1 = 16 + ($s0 - $dayStart).TotalSeconds / $span * ($w - 32)
       $x2 = 16 + ($e0 - $dayStart).TotalSeconds / $span * ($w - 32)
       if ($x2 - $x1 -lt 1.5) { $x2 = $x1 + 1.5 }
+      $isHover = ($hovering -and $hoverX -ge $x1 -and $hoverX -le $x2)
+      if ($isHover) { $hoverSeg = $sg }
       $gp = New-RoundRect ([single]$x1) $baseY ([single]($x2 - $x1)) 16 3
-      $b = New-Object System.Drawing.SolidBrush $script:UiWork
+      $b = New-Object System.Drawing.SolidBrush $(if ($isHover) { $script:UiHover } else { $script:UiWork })
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+    }
+    if ($hovering) {
+      $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 120, 132, 148)), 1
+      $g.DrawLine($pen, [single]$hoverX, [single]($baseY - 4), [single]$hoverX, [single]($baseY + 16))
+      $pen.Dispose()
+      $secAt = [int](($hoverX - 16) / [double]($w - 32) * $span)
+      if ($secAt -lt 0) { $secAt = 0 }
+      if ($secAt -gt 86399) { $secAt = 86399 }
+      $at = $dayStart.AddSeconds($secAt)
+      $txt = $at.ToString('HH:mm')
+      if ($hoverSeg) {
+        $hs = [datetime]::Parse($hoverSeg.s); $he = [datetime]::Parse($hoverSeg.e)
+        $txt = "$($hs.ToString('HH:mm:ss')) – $($he.ToString('HH:mm:ss'))   $(Format-HM ([int]$hoverSeg.sec))"
+      }
+      $btxt = New-Object System.Drawing.SolidBrush $script:UiText
+      $tw = $g.MeasureString($txt, $script:FTiny).Width
+      $tx = $hoverX + 6
+      if ($tx + $tw -gt ($w - 8)) { $tx = $hoverX - 6 - $tw }
+      $g.DrawString($txt, $script:FTiny, $btxt, [single]$tx, [single]($baseY - 22))
+      $btxt.Dispose()
     }
     for ($hr = 0; $hr -le 24; $hr += 6) {
       $x = 16 + $hr / 24.0 * ($w - 32)
@@ -915,12 +1139,15 @@ function Show-Panel($state, [datetime]$now) {
     if ($script:PanelForm -and -not $script:PanelForm.IsDisposed) { $script:PanelForm.Close() }
     $script:PanelRange = 0
     $script:PanelReady = $false
+    $script:PanelHoverX = -1
+    $script:PanelHoverY = -1
+    $script:PanelHold = $false
+    $script:PanelSig = ''
     # 高度跟着内容走：程序列出来才发现空一大块很难看
-    $nApp = @(Get-PanelApps $state $now 0).Count
-    if ($nApp -lt 1) { $nApp = 1 }
-    $w = 420
-    $h = 176 + $nApp * 24 + 78
+    $w = 520
+    $h = Get-ScreenPanelHeight $state $now 0
     $f = New-Object System.Windows.Forms.Form
+    Set-PanelDoubleBuffer $f
     $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $f.ShowInTaskbar = $false
     $f.TopMost = $true
@@ -932,13 +1159,41 @@ function Show-Panel($state, [datetime]$now) {
     $f.Add_Paint({ param($s, $e) Draw-Panel $e.Graphics $s.ClientSize.Width $s.ClientSize.Height })
     $f.Add_MouseClick({
       param($s, $e)
+      $cr = $script:PanelCloseRect
+      if ($cr -and $e.X -ge $cr.x -and $e.X -le ($cr.x + $cr.w) -and $e.Y -ge $cr.y -and $e.Y -le ($cr.y + $cr.h)) { $s.Close(); return }
       $script:PanelReady = $true
       foreach ($t in $script:TabRects) {
         if ($e.Y -ge 8 -and $e.Y -le 34 -and $e.X -ge $t.x -and $e.X -le ($t.x + $t.w + 8)) {
           $script:PanelRange = $t.i
+          # 高度跟着这一栏的程序条数走，不然切到近 7 天时最后一行会跟柱子挤在一起
+          $nh = Get-ScreenPanelHeight $script:State (Get-Date) $t.i
+          $s.ClientSize = New-Object System.Drawing.Size 520, $nh
+          $wa2 = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+          $s.Location = New-Object System.Drawing.Point (($wa2.Right - 520 - 10), ($wa2.Bottom - $nh - 10))
           $s.Invalidate()
           return
         }
+      }
+    })
+    # 鼠标停在时间轴上：高亮压到的那一段，并显示精确的起止时间
+    $f.Add_MouseDown({ param($s, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $script:PanelHold = $true } })
+    $f.Add_MouseUp({ param($s, $e) $script:PanelHold = $false })
+    $f.Add_MouseMove({
+      param($s, $e)
+      $x = [int]$e.X
+      $y = [int]$e.Y
+      if ($x -ne [int]$script:PanelHoverX -or $y -ne [int]$script:PanelHoverY) {
+        $script:PanelHoverX = $x
+        $script:PanelHoverY = $y
+        $s.Invalidate()
+      }
+    })
+    $f.Add_MouseLeave({
+      param($s, $e)
+      if ([int]$script:PanelHoverX -ne -1 -or [int]$script:PanelHoverY -ne -1) {
+        $script:PanelHoverX = -1
+        $script:PanelHoverY = -1
+        $s.Invalidate()
       }
     })
     # 点别处就收起来。但不能立刻武装：菜单刚关掉时也会触发一次 Deactivate，
@@ -950,9 +1205,70 @@ function Show-Panel($state, [datetime]$now) {
       $script:PanelArm.Add_Tick({ $script:PanelArm.Stop(); $script:PanelReady = $true })
       $script:PanelArm.Start()
     })
-    $f.Add_Deactivate({ if ($script:PanelReady -and $script:PanelForm -and -not $script:PanelForm.IsDisposed) { $script:PanelForm.Close() } })
-    $f.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Escape') { $s.Close() } })
+    $f.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Escape' -or $e.KeyCode -eq 'Space') { $s.Close() } })
+    # 关闭方式：**只有点到面板外面才关**。以前挂在 Deactivate 上，一切换焦点就关，
+    # 想看一眼、截个图都来不及。这里每 150 毫秒看一眼鼠标左键是不是按在面板外。
+    $script:PanelWatch = New-Object System.Windows.Forms.Timer
+    $script:PanelWatch.Interval = 150
+    $script:PanelWatch.Add_Tick({
+      try {
+        if (-not $script:PanelForm -or $script:PanelForm.IsDisposed) { $script:PanelWatch.Stop(); return }
+        $r = $script:PanelForm.RectangleToScreen($script:PanelForm.ClientRectangle)
+        $pos = [System.Windows.Forms.Cursor]::Position
+        $inside = ($pos.X -ge $r.Left -and $pos.X -le $r.Right -and $pos.Y -ge $r.Top -and $pos.Y -le $r.Bottom)
+        # 别的工具后来开了明细面板，就先把我的收起来，只留一个
+        try {
+          $ownerFile = Join-Path $env:TEMP 'dsh-tray-panel.owner'
+          if (Test-Path $ownerFile) {
+            $parts = (Get-Content $ownerFile -Raw -ErrorAction SilentlyContinue).Trim() -split '\|'
+            if ($parts.Count -eq 2 -and $parts[0] -ne 'screen-time-counter') {
+              if ([long]$parts[1] -gt [long]$script:PanelOpenedAt) { $script:PanelForm.Close(); return }
+            }
+          }
+        } catch {}
+        # 每 13 次心跳（约 2 秒）核一次内容：只有画出来的东西真的变了才重画。
+        # 面板上的数字都按分钟显示，一分钟才跳一次；固定每 2 秒重画纯粹是白画。
+        # 程序行跟着 30 秒的心跳换，换程序时这里也立刻看得出来。
+        $script:PanelTickN = [int]$script:PanelTickN + 1
+        if (($script:PanelTickN % 13) -eq 0) {
+          $nowP = Get-Date
+          $rngP = [int]$script:PanelRange
+          if ($rngP -eq 2) {
+            $secP = [int64](Get-RangeSeconds $script:State $nowP 7)
+            $funP = [int64](Get-RangeFun $script:State $nowP 7)
+          } else {
+            $dP = $nowP.AddDays(-$rngP)
+            $secP = [int64](Get-DaySeconds $script:State $dP)
+            $funP = [int64](Get-DayFun $script:State $dP)
+          }
+          $sigP = "$rngP|" + (Format-HM $secP) + "|" + (Format-HM $funP) + "|"
+          if ($rngP -ne 2) {
+            # 今天/昨天底下画的是 24 小时时间轴：段的条数或当前段的起点变了，也得重画
+            $sigP += [string]$script:State.current + '|'
+            $kP = Get-DayKey $dP
+            if ($script:State.days.PSObject.Properties[$kP]) { $sigP += [string]@($script:State.days.$kP.segments).Count + '|' }
+          }
+          foreach ($ap in @(Get-PanelApps $script:State $nowP $rngP)) { $sigP += $ap.n + ':' + (Format-HM ([int64]$ap.v)) + ';' }
+          if ($sigP -ne [string]$script:PanelSig) { $script:PanelSig = $sigP; $script:PanelForm.Invalidate() }
+        }
+        # 任务栏/托盘那一带不算「点到别处」：不然点托盘图标开面板时，按下的那一刻就被
+        # 判成点在面板外，面板先关一次再被点开，看着就是「闪一下又弹出来」。
+        $waNow = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $onTaskbar = ($pos.Y -gt $waNow.Bottom -or $pos.Y -lt $waNow.Top -or $pos.X -gt $waNow.Right -or $pos.X -lt $waNow.Left)
+        $downNow = ([ScreenTimeUi.Keys]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
+        if (-not $downNow) { $script:PanelHold = $false }
+        # 在面板里按下去再拖到面板外松手不算「点别处」，否则拖滚动条手滑出边界就会把面板关掉
+        if (-not $inside -and -not $onTaskbar -and -not $script:PanelHold -and $downNow) {
+          $script:PanelForm.Close()
+        }
+      } catch {}
+    })
+    $script:PanelWatch.Start()
+    $script:PanelTickN = 0
     $script:PanelForm = $f
+    # 三个工具的明细面板同一时刻只留一个，别在右下角叠成一摞
+    $script:PanelOpenedAt = [DateTime]::UtcNow.Ticks
+    try { [System.IO.File]::WriteAllText((Join-Path $env:TEMP 'dsh-tray-panel.owner'), "screen-time-counter|$($script:PanelOpenedAt)") } catch {}
     $f.Show()
     $f.Activate()
   } catch { Write-Log "面板打开失败：$($_.Exception.Message) @ line $($_.InvocationInfo.ScriptLineNumber)" }
@@ -980,14 +1296,15 @@ function Update-Tray {
       Write-Log "电源广播：$lb"
       $script:LastBroadcast = $lb
     }
-    # 前台程序换了就把上一段应用时间结算掉
+    # 前台程序换了就把上一段应用时间结算掉。
+    # 判断统一走 Test-ShouldSkipApp：不该记的前台窗口保持上一个归属，不结算。
     if ($script:State.current) {
       $fgPid = [ScreenTimeWatch]::ForegroundPid()
-      if ($fgPid -ne $PID) {
-        $fg = [ScreenTimeWatch]::ForegroundApp()
+      $fgNow = [ScreenTimeWatch]::ForegroundApp()
+      if (-not (Test-ShouldSkipApp $fgPid $fgNow)) {
         if (-not $script:AppStart) {
           Start-AppSlice $script:State $now
-        } elseif ($fg -ne $script:AppName) {
+        } elseif ($fgNow -ne $script:AppName) {
           Close-AppSlice $script:State $now
           Start-AppSlice $script:State $now
         }
@@ -1015,6 +1332,18 @@ function Start-Tray {
   $miOpen   = $menu.Items.Add('打开所在文件夹')
   $miExit   = $menu.Items.Add('退出')
   $script:Ni.ContextMenuStrip = $menu
+
+  # 左键单击托盘图标开明细。已经开着就什么都不做——不重开也不收起来，
+  # 免得点一下先收再弹、看着像闪了一下。收起还是靠点面板外或右上角的叉。
+  $script:Ni.Add_MouseClick({
+    param($s, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    try {
+      if ($script:PanelForm -and -not $script:PanelForm.IsDisposed) { return }
+      Update-Tray
+      Show-Panel $script:State (Get-Date)
+    } catch { Write-Log "left click failed: $($_.Exception.Message)" }
+  })
 
   $miDetail.Add_Click({ Update-Tray; Show-Panel $script:State (Get-Date) })
   $miNow.Add_Click({ Update-Tray })
@@ -1060,13 +1389,29 @@ function Start-Tray {
 # ---------------------------------------------------------------- 入口
 
 $state = Load-State
+# 状态读不出来时，先试着用上一次的备份救回来
+if ($null -eq $state -and (Test-Path $BakPath)) {
+  try {
+    $bak = Get-Content $BakPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($bak -and $bak.PSObject.Properties['days']) {
+      $state = $bak
+      Write-Log 'state.json 不在或读不了 -> 用 state.bak.json 恢复'
+    }
+  } catch { Write-Log "备份也读不了：$($_.Exception.Message)" }
+}
 if ($null -eq $state) { $state = New-State }
+# 每次启动留一份上一版的备份。只在这份确实有记录时才覆盖，免得把好备份冲成空的。
+if ((Test-Path $StatePath) -and (@($state.days.PSObject.Properties).Count -gt 0)) {
+  try { Copy-Item -Path $StatePath -Destination $BakPath -Force } catch { Write-Log "备份失败：$($_.Exception.Message)" }
+}
 
 $script:State = $state
 $script:IntervalSec = $IntervalSec
 $script:AppName = $null
 $script:AppStart = $null
 $script:FunApps = Get-FunApps
+$script:SkipApps = Get-SkipApps
+$script:HostApps = Get-HostApps
 $script:NotifSeen = $false
 $script:LastBroadcast = ""
 $script:TimeoutSec = Get-MonitorTimeoutSec
