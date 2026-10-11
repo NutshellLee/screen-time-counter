@@ -19,7 +19,7 @@ This little tool turns that into a single number in the tray.
 - **No leftovers**: no admin rights, no runtime, no system service; deleting one folder removes it completely.
 - **Easy to read at a glance**: the tray shows today's office time, and the panel breaks it down by program with a 24-hour timeline.
 
-Version 1.0 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
+Version 1.1 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
 
 ---
 
@@ -49,8 +49,8 @@ A segment starts when the screen turns on (or the program starts) and ends when 
 | Open folder | Opens the folder the tool lives in |
 | Exit | Quits |
 
-A left click on the tray icon also opens the details panel; clicking again while it is already open does nothing
-(it will not flash and pop again). To dismiss it, click outside the panel or hit the × in its top-right corner.
+A left click on the tray icon toggles the details panel: click to open it, click again to close it.
+You can also dismiss it by clicking outside the panel or hitting the × in its top-right corner.
 The right-click menu offers the same actions.
 
 ### The details panel
@@ -208,6 +208,7 @@ Nothing else on the system was changed: no registry entries, no services, no ins
 
 ## Version history
 
+- **1.1** (2026-10-12) — the tray click is now a toggle: click to open, click again to close. The tool can also be asked to exit cleanly from outside, so restarts and updates no longer need a forced kill.
 - **1.0** (2026-10-12) — first release: the tray icon shows today's office time; the details panel switches between today / yesterday / the last 7 days, with a 24-hour timeline for today and yesterday and a per-program breakdown.
 
 ## What each file is

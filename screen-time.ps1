@@ -1,5 +1,5 @@
 ﻿# screen-time-counter - 屏幕点亮时长计数器
-# 版本 1.0
+# 版本 1.1
 #
 # 记录屏幕真正亮着的时长。规则一句话：
 #   屏幕亮着就算，屏幕灭了就停。不做任何「人在不在」的判断，也不看键盘鼠标有没有动。
@@ -18,6 +18,7 @@ param(
   [int]$IntervalSec = 30
 )
 
+$ToolVersion = '1.1'   # 版本号：第二行注释和 README 开头要跟它一致
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'
@@ -1317,6 +1318,21 @@ function Update-Tray {
   } catch { Write-Log "心跳失败：$($_.Exception.Message) @ line $($_.InvocationInfo.ScriptLineNumber)" }
 }
 
+# 有人在自己文件夹里放一个 exit-request.txt，就正常退出：先结算当前这一段、存盘，删掉请求文件，再关。
+# 这样以后重启和更新都不用强杀进程（强杀会丢上一次存盘之后的那一段）。
+function Test-ExitRequested {
+  $flag = Join-Path $Root 'exit-request.txt'
+  if (-not (Test-Path $flag)) { return $false }
+  try { Remove-Item $flag -Force -ErrorAction SilentlyContinue } catch {}
+  Write-Log 'exit requested by flag file'
+  $script:Timer.Stop()
+  Close-Segment $script:State (Get-Date)
+  Save-State $script:State
+  $script:Ni.Visible = $false; $script:Ni.Dispose()
+  [System.Windows.Forms.Application]::Exit()
+  return $true
+}
+
 function Start-Tray {
   Initialize-WinForms
   $script:LastSec = -1
@@ -1333,13 +1349,13 @@ function Start-Tray {
   $miExit   = $menu.Items.Add('退出')
   $script:Ni.ContextMenuStrip = $menu
 
-  # 左键单击托盘图标开明细。已经开着就什么都不做——不重开也不收起来，
-  # 免得点一下先收再弹、看着像闪了一下。收起还是靠点面板外或右上角的叉。
+  # 左键单击托盘图标当开关用：点一下开，再点一下关。
+  # （鼠标按在托盘那一片不算「点到面板外」，所以不会被外面的规则先关掉。）
   $script:Ni.Add_MouseClick({
     param($s, $e)
     if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
     try {
-      if ($script:PanelForm -and -not $script:PanelForm.IsDisposed) { return }
+      if ($script:PanelForm -and -not $script:PanelForm.IsDisposed) { $script:PanelForm.Close(); return }
       Update-Tray
       Show-Panel $script:State (Get-Date)
     } catch { Write-Log "left click failed: $($_.Exception.Message)" }
@@ -1378,10 +1394,10 @@ function Start-Tray {
 
   $script:Timer = New-Object System.Windows.Forms.Timer
   $script:Timer.Interval = [int]($script:IntervalSec * 1000)
-  $script:Timer.Add_Tick({ Update-Tray })
+  $script:Timer.Add_Tick({ if (Test-ExitRequested) { return }; Update-Tray })
   $script:Timer.Start()
 
-  Write-Log "托盘启动，心跳 $($script:IntervalSec) 秒。规则：屏幕亮着就算，灭了就停。"
+  Write-Log "托盘启动，版本 $ToolVersion，心跳 $($script:IntervalSec) 秒。规则：屏幕亮着就算，灭了就停。"
   Update-Tray
   [System.Windows.Forms.Application]::Run()
 }

@@ -8,3 +8,5 @@ state.json.before-*
 categories.json
 screen-time.log
 *.log
+exit-request.txt
+
