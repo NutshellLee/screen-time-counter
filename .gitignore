@@ -1,0 +1,4 @@
+# 你的屏幕使用记录，含每天几点到几点在用，不要提交
+state.json
+screen-time.log
+*.log
