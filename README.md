@@ -1,181 +1,226 @@
-# 屏幕点亮时长
+# Screen-On Time
 
-托盘里一个数字，告诉你**今天屏幕亮着多久**，以及分成了几段、每段从几点到几点。
+**English** ｜ [简体中文](README.zh-CN.md)
 
-版本 1.0 ｜ MIT 许可（见 [LICENSE](LICENSE)）｜ 个人自用工具，Windows 10/11，不保证适配你的环境
+Windows will not tell you how long your screen was on today: Task Manager does not have that number, and neither do the Settings.
+If you want to know how many hours you spent in front of the machine and how many breaks you took, you would have to use a stopwatch.
+This little tool turns that into a single number in the tray.
+
+![Details panel (today)](docs/screenshot-today.png)
+
+**Illustration only: the numbers in the screenshot are sample data, not anyone's actual usage.**
+
+**Who it's for**: anyone who wants to know how many hours they spent in front of the computer, without installing a monitoring suite.
+
+**Why keep it in the tray**
+
+- **Entirely local, no network**: every record stays on this machine.
+- **Not a guess**: the time comes from the system's display power notifications — it starts when the screen turns on and stops when it turns off.
+- **No leftovers**: no admin rights, no runtime, no system service; deleting one folder removes it completely.
+- **Easy to read at a glance**: the tray shows today's office time, and the panel breaks it down by program with a 24-hour timeline.
+
+Version 1.0 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
 
 ---
 
-## 什么算「在用」
+## What counts as "in use"
 
-一句话：**屏幕亮着就算，屏幕灭了就停。**
+One sentence: **the screen is on, so it counts; the screen goes off, so it stops.**
 
-不判断你在不在电脑前，也不看键盘鼠标有没有动。屏幕亮着的那段时间全部计入，
-哪怕你手停了、在看视频、在发呆。
+It does not try to guess whether you are at the machine, and it does not watch the keyboard or mouse.
+Every second the screen is on is counted, even if your hands are still, even if you are watching a video or staring at a wall.
 
-一段的起点是屏幕亮起（或者程序启动），终点是屏幕灭掉（或者程序退出、机器睡眠）。
+A segment starts when the screen turns on (or the program starts) and ends when the screen turns off
+(or the program exits, or the machine sleeps).
 
-## 它长什么样
+## What it looks like
 
-- **图标**：橙色圆圈，里面是今天的办公时长，格式是「小时:分钟」。
-- **鼠标悬停**：显示今天的办公时长、娱乐时长、昨天的办公时长。
-- **右键菜单**：
+- **Icon**: an orange circle showing today's office time as `hours:minutes`.
+  ![Icon](docs/icon.png)
+- **Hovering** shows today's office time, today's entertainment time, and yesterday's office time.
+  ![Tray icon and hover tooltip](docs/tray-tooltip.png)
 
-| 菜单项 | 作用 |
+- **Right-click menu**:
+
+| Item | What it does |
 | --- | --- |
-| 明细 | 从右下角弹出一张面板，点别的地方自动收起 |
-| 立即刷新 | 马上更新一次数字（不弹窗） |
-| 打开所在文件夹 | 打开本工具所在的文件夹 |
-| 退出 | 结束程序 |
+| Details | Pops up a panel from the bottom-right; clicking elsewhere dismisses it |
+| Refresh now | Updates the number immediately (no popup) |
+| Open folder | Opens the folder the tool lives in |
+| Exit | Quits |
 
-托盘图标左键单击就能打开明细，已经开着的时候再点它不会有反应（不会闪一下又弹出来）；要收起就点面板外面，或者点右上角的叉。右键菜单里是同一套功能。
+A left click on the tray icon also opens the details panel; clicking again while it is already open does nothing
+(it will not flash and pop again). To dismiss it, click outside the panel or hit the × in its top-right corner.
+The right-click menu offers the same actions.
 
-### 明细面板
+### The details panel
 
-打开就是一张图，不用读文字：
+It is meant to be read as a picture, not as text:
 
-- 左上角三个标签切换**今天 / 昨天 / 近 7 天**，默认是今天。
-- 中间一行大字是总时长，下面小字写办公和娱乐各多少。
-- 再下面一条色条，办公是蓝色、娱乐是橙色，按比例分。
-- 然后是**按程序分**：每个程序一行，条长按比例，右边是时长，娱乐的用橙色并标注。
-- 最下面是当天的一条 **24 小时时间轴**，蓝色的块就是屏幕亮着的时段，一眼看出什么时候在用、中间断了多久。
-- 切到近 7 天时，最下面换成七根竖条，一天一根。鼠标停在某一根上，它会高亮并显示那天的日期和时长。
+- Three tabs at the top switch between **Today / Yesterday / Last 7 days**; Today is the default.
+- The big number in the middle is the total; the small line under it splits it into office and entertainment.
+- Below that, a colour bar divides the same way: office is blue, entertainment is orange.
+- Then **by program**: one row per program, bar length in proportion, time on the right, entertainment rows in orange and labelled.
+- At the bottom, a **24-hour timeline** for the day: the blue blocks are the stretches where the screen was on, so you can see
+  at a glance when you worked and where the gaps were.
+  Hovering the timeline highlights the segment under the cursor and shows its exact start and end times.
+- On the Last 7 days tab, the bottom becomes seven vertical bars, one per day. Hovering a bar highlights it and shows that day's date and length.
 
-面板的高度跟着程序条数走，程序少就矮一点。
+![Last 7 days](docs/screenshot-week.png)
 
-## 怎么装
+The panel's height follows the number of programs: fewer programs, shorter panel.
 
-1. 把整个 `screen-time-counter` 文件夹放到一个固定位置。路径不敏感，中文和空格都行。
-   **但必须是能写的目录**——别放在「Program Files」这类要管理员权限的地方，它要在自己这个
-   文件夹里写记录和日志。
-2. 双击 `start-screen-time`。托盘出现图标就算装好，首次启动等一两秒。
-3. 找不到图标：点任务栏右下角那个向上的小箭头（∧），多半在「隐藏的图标」面板里；
-   想常驻就去 设置 → 个性化 → 任务栏 → 其他系统托盘图标，把开关打开。
-   注意那个列表里它显示成「Windows PowerShell」，不叫「屏幕点亮时长」，认它靠橙色圆圈。
-4. **建议设上开机自启**，原因见下面「已知限制」：
-   右键启动器 → 发送到 → 桌面快捷方式；按 Win + R 输入 `shell:startup` 回车，
-   把快捷方式剪贴进「启动」文件夹。
+## Installation
 
-### 桌面图标
+1. Put the whole `screen-time-counter` folder somewhere permanent. The path does not matter — spaces and non-ASCII characters are fine.
+   **But it must be writable**: do not put it under `Program Files` or anywhere that needs administrator rights,
+   because the tool writes its data and logs inside its own folder.
+2. Double-click `start-screen-time`. The icon appearing in the tray means it is installed; give it a second or two.
+3. Cannot find the icon: click the little up arrow (∧) at the bottom-right of the taskbar — it is usually in the hidden-icons panel.
+   To keep it visible: Settings → Personalization → Taskbar → Other system tray icons, and turn it on.
+   Note that it shows up there as "Windows PowerShell", not as this tool's name; recognise it by the orange circle.
+4. **Turning on autostart is recommended** — for the reason in "Known limitations" below:
+   right-click the launcher → Send to → Desktop (create shortcut); press Win + R, type `shell:startup`, press Enter,
+   and paste the shortcut into that folder.
 
-桌面快捷方式默认显示的是 Windows 脚本的图标，三个工具长得一样，认不出来。
-想让它们跟托盘那个圆点一致：右键快捷方式 → 属性 → 更改图标 → 选本文件夹里的 `icon.ico`。
+### Desktop icon
 
-## 怎么用
+A shortcut to a script shows the generic Windows script icon by default, and all three tools look identical.
+To make it match the tray dot: right-click the shortcut → Properties → Change Icon → pick `icon.ico` in this folder.
 
-- 平时不用管，它每 30 秒保存一次。
-- 想看细节就右键点「明细」。
-- 同一时间只会跑一个：重复双击，多出来的那个会自己退出。
-- 占内存大约 100 到 150 兆。
+## Usage
 
-## 它怎么算的
+- Leave it alone; it saves every 30 seconds.
+- For details, right-click the icon and choose *Details*.
+- Only one instance runs at a time: double-clicking again makes the extra one exit by itself.
+- It uses roughly 100–150 MB of memory.
 
-开机自启后，它做三件事：
+## Under the hood
 
-1. 订阅系统的「显示器电源状态」通知。屏幕亮、灭各会收到一条，这是精确的事件，不是猜的。
-2. 屏幕亮着的时候开始计时。
-3. 屏幕灭掉（或者你退出程序、或者检测到机器被挂起）时结束这一段，整段计入，不做任何扣减。
+- **Screen state is not guessed**: it subscribes to the system's display power notifications, so on and off each arrive as an event,
+  and every one is written to the log verbatim.
+- **Time is settled by a 30-second heartbeat**; two adjacent segments (within 60 seconds) are merged automatically.
+- **Time while it was not running is backfilled from the system log**: boot, sleep and wake records; running counts, sleeping stops the clock.
+- **State is written to a temp file and then swapped in**; if it cannot be read, the remains are kept, a line goes into the log,
+  and the previous backup is restored. It sits at roughly 100–150 MB of memory.
 
-紧挨着的两段（间隔 60 秒以内）会自动合并，免得重启一次就多出一段。
+## How it measures
 
-## 按程序分
+Once it starts with Windows, it does three things:
 
-明细里会列出每个程序用了多久，从长到短。做法是每隔 30 秒问一次「现在最前面的是哪个窗口」，
-换了就结算上一段。所以它记的是**你正在看的那个窗口**：视频在后台放着、你在别的窗口干活，
-那段时间算给前台那个窗口。
+1. It subscribes to the system's display power-state notifications. Turning the screen on or off delivers an event:
+   this is exact, not a guess.
+2. While the screen is on, it counts.
+3. When the screen goes off (or you exit the program, or the machine is detected as suspended), the segment is closed and counted in full,
+   with no deduction.
 
-## 办公和娱乐怎么分
+Two adjacent segments (within 60 seconds of each other) are merged, so one restart does not create an extra meaningless segment.
 
-**只按程序分，不判断内容。**
+## By program
 
-- 娱乐程序列在 `categories.json` 里（默认是 Steam 及其相关进程）。列进去的，从「办公时长」里扣掉，
-  但仍然单独显示出来。
-- 不在名单里的一律算办公。**浏览器整体算办公**——因为它既用来看技术视频，也用来做创作。
-- 所以：在 Chrome 里看娱乐视频，会被算成办公。这是一开始就说好的取舍，不是 bug。
+The panel lists how long each program was used, longest first. It asks "which window is in front?" every 30 seconds and closes
+the previous segment when that changes. So it records **the window you were looking at**: if a video plays in the background while you
+work in another window, that time goes to the foreground window.
 
-为什么不做内容判断：试过两条路都走不通。按关键词判娱乐，娱乐内容无穷多；按白名单判工作，
-技术视频跨几十个频道、标题各不相同，也列不全。要做准只能上模型，那就要联网或者本地装模型，
-而且会把你看的标题发出去。
+## Office vs. entertainment
 
-要改名单：把 `categories.example.json` 复制一份、改名成 `categories.json`，再把进程名加进
-「娱乐」那一栏。进程名可以在任务管理器的「详细信息」里看到，就是不带 `.exe` 的那个名字。
-改完重启工具生效。`categories.json` 是你自己那份，不进仓库；文件不在时用工具内置的默认名单。
+**It splits by program name only, never by content.**
 
-## 回填以前的数据
+- Entertainment programs are listed in `categories.json` (Steam and its helper processes by default). Their time is subtracted from
+  "office time" but still shown separately.
+- Anything not on the list counts as office. **Browsers count as office as a whole**, because the same browser is used for
+  technical videos and for making things.
+- So watching entertainment videos in Chrome counts as office. That trade-off was decided up front; it is not a bug.
 
-工具没运行的那段时间记不到，但可以从系统日志里推个大概。先右键退出托盘，然后跑一次：
+Why not judge content: both obvious routes were tried and both fail. Judging entertainment by keywords is hopeless because entertainment
+is endless; whitelisting work by keywords fails because technical videos span dozens of channels with wildly different titles.
+Doing it properly needs a model, which means going online or installing one locally, and it would mean sending your titles out.
+
+To change the list: copy `categories.example.json` to `categories.json` and add process names to the "娱乐" (entertainment) section.
+Process names are visible in Task Manager's *Details* tab — the name without `.exe`.
+Restart the tool for the change to apply. `categories.json` is your own copy and is not committed; if the file is missing,
+the built-in default list is used.
+
+## Backfilling older data
+
+Time while the tool was not running cannot be recorded, but it can be estimated from the system log. Exit the tray first, then run:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File screen-time.ps1 -Backfill
 ```
 
-默认回填最近 7 天，可以用 `-BackfillDays 30` 改范围。原理是翻系统日志里的开机、关机、睡眠、
-唤醒记录，把「机器在运行」的时间算进去——睡眠了才算停。
+It backfills the last 7 days by default; `-BackfillDays 30` widens the range. It works by reading boot, shutdown, sleep and wake
+records from the system log and counting "the machine was running" as in-use — only sleep stops the clock.
 
-- 拿得到精确信号的那部分（工具在运行）用精确口径：屏幕亮着才算。
-- 拿不到的那部分就用降级口径：机器在运行就算。两种情况一视同仁，界面上不做任何标记。
-- **按程序分的那部分补不回来**——系统日志里没有「当时哪个窗口在前面」这种记录，
-  只能从现在开始攒。
-- 关机时间不会被算进去（日志里有开机记录，说明之前是关着的）。
-- 回填必须在托盘退出后做，否则托盘每 30 秒会用自己的数据把它覆盖掉。
+- Where an exact signal exists (the tool was running), the exact rule is used: only a lit screen counts.
+- Where it does not, the degraded rule is used: the machine running counts. Both are treated the same way, with no marker in the UI.
+- The **per-program breakdown cannot be filled in** — the system log has no record of which window was in front; that part only accumulates from now on.
+- Time when the machine was off is not counted (a boot record means it was off before that).
+- The backfill must be done with the tray exited, otherwise the tray overwrites it with its own data every 30 seconds.
 
-## 已知限制
+## Known limitations
 
-- **必须一直开着**。没运行的那段时间记不到，事后也补不回来——Windows 自己不记录屏幕开关。
-  所以建议设开机自启。
-- 装之前的日子没有数据。想在旧日期上估个大概，只能翻系统日志，用开机和睡眠的时间去推，
-  那个估算误差就是每次睡眠之前灭屏的那几分钟。
-- 只记「屏幕亮着」，不区分你在干什么。看视频、写代码、发呆，都是一样的。
-- 如果你用显示器自己的开关把屏幕关掉，系统不知道这件事，那段时间会照算。
-- 锁屏（Win+L）的时候屏幕还亮着，所以也算在内。
+- **It has to stay running.** Time while it is not running cannot be recorded and cannot be recovered later — Windows itself does not
+  log screen on/off. That is why autostart is recommended.
+- Days before you installed it have no data. To approximate old dates you can only read the system log and reason from boot and sleep times;
+  the error is the few minutes between the screen going off and the machine sleeping.
+- It only records "the screen was on", with no idea what you were doing. Watching videos, writing code, staring into space: all the same.
+- If you switch the monitor off with its own power button, the system does not know, and that time is still counted.
+- Locking the screen (Win+L) leaves the display on, so it counts too.
 
-## 常见故障对照
+## Troubleshooting
 
-**图标不见了**
-先点任务栏的 ∧ 看隐藏面板；再检查 设置 → 个性化 → 任务栏 → 其他系统托盘图标。
+**The icon is gone**
+Click the ∧ arrow on the taskbar to check the hidden panel; then check Settings → Personalization → Taskbar → Other system tray icons.
 
-**数字一直不动**
-先看明细里那一段是不是还在「还在算」。数字只在屏幕灭掉、或者你退出时才结算。
-你一直坐着用，它就一直是同一段，看起来像不动。
+**The numbers never move**
+Check whether the current segment in the panel still says "counting". A number is only settled when the screen goes off or when you exit.
+If you keep sitting there working, it is one long segment and looks frozen.
 
-**开机后图标不出现，以前是好的**
-多半是挪过文件夹，自启快捷方式失效了，删掉重建。
+**The icon stopped appearing at logon although it used to work**
+Most likely the folder was moved and the autostart shortcut broke. Delete it and recreate it.
 
-**双击启动器没反应**
-先给它解除锁定（右键文件 → 属性 → 底下如果有「解除锁定」，勾上）；
-再看杀毒软件是不是拦了 `.vbs`。
-手动跑一次看有没有红字：
+**Double-clicking the launcher does nothing**
+Unblock the files first (right-click → Properties → tick *Unblock* if present), then check whether antivirus blocked the `.vbs`.
+Run it by hand to see any red text:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File "D:\tools\screen-time-counter\screen-time.ps1" -Once
 ```
 
-## 日志怎么看
+## Reading the log
 
-`screen-time.log` 在工具文件夹里。里面记着托盘启动、每次收到屏幕亮灭通知、每一段的结算。
-屏幕灭了却没看到「记一段」，就把日志留给我看。
+`screen-time.log` sits in the tool folder. It records the tray starting, every display on/off notification received, and every segment closed.
+If the screen goes off and no "segment recorded" line appears, keep the log so it can be looked at.
 
-## 怎么删干净
+## Uninstalling completely
 
-1. 右键托盘图标 → 退出。这一步别省。
-2. 删掉整个 `screen-time-counter` 文件夹。你的使用记录 `state.json` 也在里面，一起没了。
-3. 删掉「启动」文件夹里那个快捷方式（如果你设过自启）。
-   打开方式：Win + R 输入 `shell:startup` 回车。
+1. Right-click the tray icon → Exit. Do not skip this.
+2. Delete the whole `screen-time-counter` folder. Your usage record `state.json` is inside it and goes with it.
+3. Delete the Startup shortcut if you created one (Win + R, type `shell:startup`, press Enter).
 
-除此之外没改过系统别的东西：没有注册表项，没有系统服务，没有安装程序。
+Nothing else on the system was changed: no registry entries, no services, no installer.
 
+## The other two tools in this set
 
-## 文件都是干什么的
+- [Video Tab Counter](https://github.com/NutshellLee/video-tab-counter) — how many videos you finished today and how long they were
+- [LLM Token Counter (DSH)](https://github.com/NutshellLee/dsh-token-counter) — how many tokens this machine's DSH used today
 
-| 文件 | 说明 |
+## Version history
+
+- **1.0** (2026-10-12) — first release: the tray icon shows today's office time; the details panel switches between today / yesterday / the last 7 days, with a 24-hour timeline for today and yesterday and a per-program breakdown.
+
+## What each file is
+
+| File | What it is |
 | --- | --- |
-| `screen-time.ps1` | 主程序 |
-| `start-screen-time.vbs` | 启动器，双击这个 |
-| `categories.example.json` | 分类名单的示例；复制成 `categories.json` 再自己改（那份不进仓库） |
-| `icon.ico` | 桌面快捷方式用的图标 |
-| `README.md` | 就是本文件 |
-| `AGENTS.md` | 给改代码的 AI 看的，普通使用可以不管 |
-| `LICENSE` | 许可 |
-| `state.json` / `screen-time.log` | 运行后自动生成，可以随手删 |
+| `screen-time.ps1` | The main program |
+| `start-screen-time.vbs` | Launcher — double-click this one |
+| `categories.example.json` | Example category list; copy it to `categories.json` and edit that (your copy is not committed) |
+| `icon.ico` | The icon used for the desktop shortcut |
+| `README.md` / `README.zh-CN.md` | This document, in English and Chinese |
+| `AGENTS.md` | Notes for AI or developers changing the code; safe to ignore as a user |
+| `LICENSE` | License |
+| `state.json` / `screen-time.log` | Created at runtime; safe to delete |
 
-想改代码，看 [AGENTS.md](AGENTS.md)。
+To change the code, read [AGENTS.md](AGENTS.md).
