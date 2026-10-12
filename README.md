@@ -2,6 +2,8 @@
 
 **English** ｜ [简体中文](README.zh-CN.md)
 
+A treadmill is compelling because it records numbers — work with no feedback is hard to stick with.
+
 Windows will not tell you how long your screen was on today: Task Manager does not have that number, and neither do the Settings.
 If you want to know how many hours you spent in front of the machine and how many breaks you took, you would have to use a stopwatch.
 This little tool turns that into a single number in the tray.
