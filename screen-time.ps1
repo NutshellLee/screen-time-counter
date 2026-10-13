@@ -1,5 +1,5 @@
 ﻿# screen-time-counter - 屏幕点亮时长计数器
-# 版本 1.1
+# 版本 1.2
 #
 # 记录屏幕真正亮着的时长。规则一句话：
 #   屏幕亮着就算，屏幕灭了就停。不做任何「人在不在」的判断，也不看键盘鼠标有没有动。
@@ -18,7 +18,7 @@ param(
   [int]$IntervalSec = 30
 )
 
-$ToolVersion = '1.1'   # 版本号：第二行注释和 README 开头要跟它一致
+$ToolVersion = '1.2'   # 版本号：第二行注释和 README 开头要跟它一致
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'
@@ -458,10 +458,48 @@ function Start-AppSlice($state, [datetime]$at) {
 
 function Close-AppSlice($state, [datetime]$at) {
   if (-not $script:AppStart) { return }
-  $sec = [int][Math]::Round((New-TimeSpan -Start $script:AppStart -End $at).TotalSeconds)
-  Add-AppSeconds $state $script:AppStart $script:AppName $sec
+  $from = $script:AppStart
+  $name = $script:AppName
   $script:AppStart = $null
   $script:AppName  = $null
+  if ($at -lt $from) { $at = $from }
+  # 程序时长也要按天切开，理由跟整段一样：跨零点的一段整块记给开始那天，
+  # 「按程序分」就会昨天多、今天少，和上面的大字对不上。
+  $bounds = @($from)
+  $cur = $from.Date.AddDays(1)
+  while ($cur -lt $at) { $bounds += $cur; $cur = $cur.AddDays(1) }
+  $bounds += $at
+  for ($i = 0; $i -lt $bounds.Count - 1; $i++) {
+    $sec = [int][Math]::Round(($bounds[$i + 1] - $bounds[$i]).TotalSeconds)
+    Add-AppSeconds $state $bounds[$i] $name $sec
+  }
+}
+
+# 把一段已经确定结束的时间记到它所属的那一天（同一天里紧邻的两段合并）。
+# 调用方保证 [from, to] 不跨天。
+function Add-ClosedSegment($state, [datetime]$from, [datetime]$to, [int]$counted) {
+  $k = Ensure-Day $state $from
+  $day = $state.days.$k
+  $day.seconds = [int64]$day.seconds + [int64]$counted
+  $seg = [pscustomobject]@{
+    s   = $from.ToString('o')
+    e   = $to.ToString('o')
+    sec = $counted
+  }
+  # 紧邻的上一段（间隔 60 秒内）合并，免得重启一次就多出一段
+  $segs = @($day.segments)
+  $merged = $false
+  if ($segs.Count -gt 0) {
+    $last = $segs[-1]
+    if (($from - [datetime]::Parse($last.e)).TotalSeconds -le 60) {
+      $last.e   = $to.ToString('o')
+      $last.sec = [int]$last.sec + $counted
+      $day.segments = $segs
+      $merged = $true
+    }
+  }
+  if (-not $merged) { $day.segments = @($segs + $seg) }
+  return $merged
 }
 
 # 收尾一段：屏幕灭了（或者程序退出、检测到挂起）就把 [开始, 结束] 整段记下来
@@ -470,33 +508,26 @@ function Close-Segment($state, [datetime]$endAt) {
   if (-not $state.current) { return }
   Close-AppSlice $state $endAt
   $start = [datetime]::Parse($state.current)
-  $total = ($endAt - $start).TotalSeconds
-  if ($total -lt 0) { $total = 0 }
-  $counted = [int][Math]::Round($total)
+  if ($endAt -lt $start) { $endAt = $start }
 
-  if ($counted -ge 1) {
-    $k = Ensure-Day $state $start
-    $day = $state.days.$k
-    $day.seconds = [int64]$day.seconds + [int64]$counted
-    $seg = [pscustomobject]@{
-      s   = $start.ToString('o')
-      e   = $endAt.ToString('o')
-      sec = $counted
-    }
-    # 紧邻的上一段（间隔 60 秒内）合并，免得重启一次就多出一段
-    $segs = @($day.segments)
-    $merged = $false
-    if ($segs.Count -gt 0) {
-      $last = $segs[-1]
-      if (($start - [datetime]::Parse($last.e)).TotalSeconds -le 60) {
-        $last.e   = $endAt.ToString('o')
-        $last.sec = [int]$last.sec + $counted
-        $day.segments = $segs
-        $merged = $true
-      }
-    }
-    if (-not $merged) { $day.segments = @($segs + $seg) }
-    Write-Log "记一段 $($start.ToString('HH:mm:ss')) -> $($endAt.ToString('HH:mm:ss'))，$counted 秒$(if($merged){'，已并入上一段'})"
+  # 跨零点的一段要按天切开。以前整段记给「开始的那一天」，
+  # 于是从昨晚一直用到今天早上的话，今天一开面板几乎看不到东西
+  # （零点之后的时长全被算进了昨天），看着像没记录。
+  # 回填那条路本来就是把区间夹在当天边界里的，这里跟它对齐。
+  $bounds = @($start)
+  $cur = $start.Date.AddDays(1)
+  while ($cur -lt $endAt) { $bounds += $cur; $cur = $cur.AddDays(1) }
+  $bounds += $endAt
+
+  for ($i = 0; $i -lt $bounds.Count - 1; $i++) {
+    $a = $bounds[$i]
+    $b = $bounds[$i + 1]
+    $sec = ($b - $a).TotalSeconds
+    if ($sec -lt 0) { $sec = 0 }
+    $counted = [int][Math]::Round($sec)
+    if ($counted -lt 1) { continue }
+    $merged = Add-ClosedSegment $state $a $b $counted
+    Write-Log "记一段 $($a.ToString('HH:mm:ss')) -> $($b.ToString('HH:mm:ss'))，$counted 秒$(if($merged){'，已并入上一段'})"
   }
   $state.current = $null
 }
@@ -678,11 +709,16 @@ function Get-DaySeconds($state, $d) {
   $base = [int64]0
   if ($state.days.PSObject.Properties[$k]) { $base = [int64]$state.days.$k.seconds }
   $live = 0
-  # 正在计时的那一段也算进去（末尾的空闲要等收尾时才扣）
+  # 正在计时的那一段也算进去（末尾的空闲要等收尾时才扣）。
+  # 但要夹在当天的边界里：它可能昨天就开始了，也可能现在还开着——
+  # 前者不能算到今天头上，后者不能把今天之后的（不存在的）时间算进来。
   if ($state.current) {
-    $start = [datetime]::Parse($state.current)
-    if ((Get-DayKey $start) -eq $k) {
-      $live = [int](New-TimeSpan -Start $start -End (Get-Date)).TotalSeconds
+    $from = [datetime]::Parse($state.current)
+    $to   = Get-Date
+    if ($from -lt $d.Date) { $from = $d.Date }
+    if ($to -gt $d.Date.AddDays(1)) { $to = $d.Date.AddDays(1) }
+    if ($to -gt $from) {
+      $live = [int](New-TimeSpan -Start $from -End $to).TotalSeconds
       if ($live -lt 0) { $live = 0 }
     }
   }
@@ -693,7 +729,11 @@ function Get-DaySegmentCount($state, $d) {
   $k = Get-DayKey $d
   $n = 0
   if ($state.days.PSObject.Properties[$k]) { $n = @($state.days.$k.segments).Count }
-  if ($state.current -and (Get-DayKey ([datetime]::Parse($state.current))) -eq $k) { $n++ }
+  # 这段只要和当天有重叠就算一段——跨零点的那段会同时算进两天
+  if ($state.current) {
+    $cs = [datetime]::Parse($state.current)
+    if ($cs -lt $d.Date.AddDays(1) -and (Get-Date) -ge $d.Date) { $n++ }
+  }
   return $n
 }
 
@@ -768,9 +808,16 @@ function Get-DetailText($state, [datetime]$now) {
       $e0 = [datetime]::Parse($sg.e).ToString('HH:mm')
       [void]$sb.AppendLine("    $s0 – $e0" + (Format-HM $sg.sec).PadLeft(13) + "  " + (Format-Bar ([int64]$sg.sec) ([int64]$maxSeg)))
     }
-    if ($state.current -and (Get-DayKey ([datetime]::Parse($state.current))) -eq $k) {
+    if ($state.current) {
       $s0 = [datetime]::Parse($state.current)
-      [void]$sb.AppendLine("    $($s0.ToString('HH:mm')) – 现在" + "（还在算）".PadLeft(11))
+      $vs = $s0
+      if ((Get-DayKey $vs) -ne $k) {
+        $vs = $d.Date
+        if ($vs -lt $s0) { $vs = $s0 }
+      }
+      if ((Get-DayKey $vs) -eq $k) {
+        [void]$sb.AppendLine("    $($vs.ToString('HH:mm')) – 现在" + "（还在算）".PadLeft(11))
+      }
     }
     # 按程序分（娱乐的标出来）
     $rows = Get-DayAppRows $state $d

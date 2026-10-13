@@ -21,7 +21,7 @@ This little tool turns that into a single number in the tray.
 - **No leftovers**: no admin rights, no runtime, no system service; deleting one folder removes it completely.
 - **Easy to read at a glance**: the tray shows today's office time, and the panel breaks it down by program with a 24-hour timeline.
 
-Version 1.1 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
+Version 1.2 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
 
 ---
 
@@ -210,6 +210,7 @@ Nothing else on the system was changed: no registry entries, no services, no ins
 
 ## Version history
 
+- **1.2** (2026-10-14) — a segment that crosses midnight is now split by day. It used to be filed entirely under the day it started, so using the machine from the evening into the small hours made the new day show almost nothing; app time is split the same way.
 - **1.1** (2026-10-12) — the tray click is now a toggle: click to open, click again to close. The tool can also be asked to exit cleanly from outside, so restarts and updates no longer need a forced kill.
 - **1.0** (2026-10-12) — first release: the tray icon shows today's office time; the details panel switches between today / yesterday / the last 7 days, with a 24-hour timeline for today and yesterday and a per-program breakdown.
 
