@@ -10,3 +10,7 @@ screen-time.log
 *.log
 exit-request.txt
 
+
+# 改代码前的手工备份；命令里变量没展开时误建出来的目录
+*.bak-*
+%SystemDrive%/

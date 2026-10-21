@@ -21,7 +21,7 @@ This little tool turns that into a single number in the tray.
 - **No leftovers**: no admin rights, no runtime, no system service; deleting one folder removes it completely.
 - **Easy to read at a glance**: the tray shows today's office time, and the panel breaks it down by program with a 24-hour timeline.
 
-Version 1.2 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
+Version 1.3.0 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
 
 ---
 
@@ -142,6 +142,16 @@ To change the list: copy `categories.example.json` to `categories.json` and add 
 Process names are visible in Task Manager's *Details* tab — the name without `.exe`.
 Restart the tool for the change to apply. `categories.json` is your own copy and is not committed; if the file is missing,
 the built-in default list is used.
+## Offline mode (you leave, the machine keeps running)
+
+Right-click the tray icon → Details. There is an offline switch at the top right of the panel (labelled "offline", the sliding kind): flip it right to turn offline mode on, flip it back left to turn it off.
+
+- While it is on, screen time and per-program time are still recorded, but the offline stretch is drawn in grey-blue and no longer counts as office time.
+- It is for this case: you walk away while DSH or another task keeps running and the screen stays on. The tool cannot tell whether you are there, so the switch is manual.
+- After you turn it off, new time goes back to the normal colour; the offline stretch already recorded keeps its grey-blue, it is not erased — it just does not count as office time.
+- Office time = screen time − entertainment time − offline time. The big number, the tray tooltip and the 7-day bars all use that definition.
+- On the timeline and the 7-day bars, office/entertainment keep their blue/orange; offline time is stacked in grey-blue within the same bar. Per-program bars are split the same way.
+- The offline state is saved in `state.json` and survives a restart.
 
 ## Backfilling older data
 
@@ -210,6 +220,7 @@ Nothing else on the system was changed: no registry entries, no services, no ins
 
 ## Version history
 
+- **1.3.0** (2026-10-19) — manual offline mode: when you leave but the machine keeps running, flip the switch at the top right of the panel; the time is still recorded but no longer counts as office time. The timeline, the 7-day bars and per-program bars mark offline stretches in grey-blue.
 - **1.2** (2026-10-14) — a segment that crosses midnight is now split by day. It used to be filed entirely under the day it started, so using the machine from the evening into the small hours made the new day show almost nothing; app time is split the same way.
 - **1.1** (2026-10-12) — the tray click is now a toggle: click to open, click again to close. The tool can also be asked to exit cleanly from outside, so restarts and updates no longer need a forced kill.
 - **1.0** (2026-10-12) — first release: the tray icon shows today's office time; the details panel switches between today / yesterday / the last 7 days, with a 24-hour timeline for today and yesterday and a per-program breakdown.

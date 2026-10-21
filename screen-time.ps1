@@ -1,5 +1,5 @@
 ﻿# screen-time-counter - 屏幕点亮时长计数器
-# 版本 1.2
+# 版本 1.3.0
 #
 # 记录屏幕真正亮着的时长。规则一句话：
 #   屏幕亮着就算，屏幕灭了就停。不做任何「人在不在」的判断，也不看键盘鼠标有没有动。
@@ -18,7 +18,7 @@ param(
   [int]$IntervalSec = 30
 )
 
-$ToolVersion = '1.2'   # 版本号：第二行注释和 README 开头要跟它一致
+$ToolVersion = '1.3.0'   # 版本号：第二行注释和 README 开头要跟它一致
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'
@@ -354,17 +354,36 @@ function Test-ShouldSkipApp([int]$fgPid, [string]$name) {
 function Get-DayAppRows($state, $d) {
   $k = Get-DayKey $d
   $rows = @()
-  if ($state.days.PSObject.Properties[$k] -and $state.days.$k.PSObject.Properties['apps']) {
-    foreach ($p in @($state.days.$k.apps.PSObject.Properties)) {
-      if (Test-SkipApp $p.Name) { continue }   # 控制台那类不显示
-      $rows += [pscustomobject]@{ n = $p.Name; v = [int64]$p.Value }
+  if ($state.days.PSObject.Properties[$k]) {
+    $day = $state.days.$k
+    if ($day.PSObject.Properties['apps']) {
+      foreach ($p in @($day.apps.PSObject.Properties)) {
+        if (Test-SkipApp $p.Name) { continue }   # 控制台那类不显示
+        $rows += [pscustomobject]@{ n = $p.Name; v = [int64]$p.Value; o = [int64]0 }
+      }
+    }
+    if ($day.PSObject.Properties['appsOff']) {
+      foreach ($p in @($day.appsOff.PSObject.Properties)) {
+        if (Test-SkipApp $p.Name) { continue }
+        $found = $false
+        foreach ($r in $rows) { if ($r.n -eq $p.Name) { $r.o += [int64]$p.Value; $found = $true } }
+        if (-not $found) { $rows += [pscustomobject]@{ n = $p.Name; v = [int64]0; o = [int64]$p.Value } }
+      }
     }
   }
   if ($script:AppStart -and $script:AppName -and (Get-DayKey $script:AppStart) -eq $k) {
     $live = [int][Math]::Round((New-TimeSpan -Start $script:AppStart -End (Get-Date)).TotalSeconds)
     $found = $false
-    foreach ($r in $rows) { if ($r.n -eq $script:AppName) { $r.v += $live; $found = $true } }
-    if (-not $found) { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]$live } }
+    foreach ($r in $rows) {
+      if ($r.n -eq $script:AppName) {
+        if ($state.offline) { $r.o += $live } else { $r.v += $live }
+        $found = $true
+      }
+    }
+    if (-not $found) {
+      if ($state.offline) { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]0; o = [int64]$live } }
+      else { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]$live; o = [int64]0 } }
+    }
   }
   return $rows
 }
@@ -375,9 +394,10 @@ function Get-DayFun($state, $d) {
   return $sum
 }
 
-# 办公时长 = 屏幕时长 − 娱乐程序的时长（不小于 0）
+# 办公时长 = 屏幕时长 − 娱乐程序的时长 − 离线区间（不小于 0）。
+# 离线是手动开关：机器还在跑、还在记录，但那段时间不算你在上班。
 function Get-DayWork($state, $d) {
-  $w = [int64](Get-DaySeconds $state $d) - [int64](Get-DayFun $state $d)
+  $w = [int64](Get-DaySeconds $state $d) - [int64](Get-DayFun $state $d) - [int64](Get-DayOffline $state $d)
   if ($w -lt 0) { $w = 0 }
   return $w
 }
@@ -388,6 +408,8 @@ function New-State {
     days        = [pscustomobject]@{}
     current     = $null      # 正在计时的那一段的开始时间
     lastTick    = $null
+    offline     = $false     # 手动离线模式：时间照记，但不并进办公时长
+    offlineFrom = $null      # 这一段离线从什么时候开始
   }
 }
 
@@ -398,6 +420,8 @@ function Load-State {
     if (-not $s.PSObject.Properties['days'])    { $s | Add-Member -NotePropertyName days -NotePropertyValue ([pscustomobject]@{}) }
     if (-not $s.PSObject.Properties['current']) { $s | Add-Member -NotePropertyName current -NotePropertyValue $null }
     if (-not $s.PSObject.Properties['lastTick']){ $s | Add-Member -NotePropertyName lastTick -NotePropertyValue $null }
+    if (-not $s.PSObject.Properties['offline'])    { $s | Add-Member -NotePropertyName offline    -NotePropertyValue $false }
+    if (-not $s.PSObject.Properties['offlineFrom']){ $s | Add-Member -NotePropertyName offlineFrom -NotePropertyValue $null }
     return $s
   } catch {
     # 读不出来（被写到一半、被截断）**不等于**第一次运行：留一份残骸再重新开始
@@ -425,18 +449,21 @@ function Save-State($s) {
 function Ensure-Day($state, $d) {
   $k = Get-DayKey $d
   if (-not $state.days.PSObject.Properties[$k]) {
-    $state.days | Add-Member -NotePropertyName $k -NotePropertyValue ([pscustomobject]@{ seconds = 0; segments = @(); apps = [pscustomobject]@{} })
-  } elseif (-not $state.days.$k.PSObject.Properties['apps']) {
-    $state.days.$k | Add-Member -NotePropertyName apps -NotePropertyValue ([pscustomobject]@{})
+    $state.days | Add-Member -NotePropertyName $k -NotePropertyValue ([pscustomobject]@{ seconds = 0; segments = @(); apps = [pscustomobject]@{}; appsOff = [pscustomobject]@{}; off = @() })
+  } else {
+    if (-not $state.days.$k.PSObject.Properties['apps'])    { $state.days.$k | Add-Member -NotePropertyName apps    -NotePropertyValue ([pscustomobject]@{}) }
+    if (-not $state.days.$k.PSObject.Properties['appsOff']) { $state.days.$k | Add-Member -NotePropertyName appsOff -NotePropertyValue ([pscustomobject]@{}) }
+    if (-not $state.days.$k.PSObject.Properties['off'])     { $state.days.$k | Add-Member -NotePropertyName off     -NotePropertyValue @() }
   }
   return $k
 }
 
-# 把一段时间记到某个程序头上
-function Add-AppSeconds($state, [datetime]$at, [string]$name, [int]$sec) {
+# 把一段时间记到某个程序头上。离线那段记到 appsOff，办公/娱乐的合计都看不到它，
+# 但面板上按程序的柱子会把它用另一种颜色拼出来。
+function Add-AppSeconds($state, [datetime]$at, [string]$name, [int]$sec, [switch]$Off) {
   if ($sec -lt 1 -or -not $name) { return }
   $k = Ensure-Day $state $at
-  $apps = $state.days.$k.apps
+  $apps = if ($Off) { $state.days.$k.appsOff } else { $state.days.$k.apps }
   $old = 0
   if ($apps.PSObject.Properties[$name]) { $old = [int64]$apps.$name }
   if ($apps.PSObject.Properties[$name]) { $apps.$name = $old + [int64]$sec }
@@ -471,8 +498,99 @@ function Close-AppSlice($state, [datetime]$at) {
   $bounds += $at
   for ($i = 0; $i -lt $bounds.Count - 1; $i++) {
     $sec = [int][Math]::Round(($bounds[$i + 1] - $bounds[$i]).TotalSeconds)
-    Add-AppSeconds $state $bounds[$i] $name $sec
+    Add-AppSeconds $state $bounds[$i] $name $sec -Off:([bool]$state.offline)
   }
+}
+
+# 记一段离线区间，按天切开（跟整段同样的理由：跨零点要分到两天）。
+function Add-OfflineInterval($state, [datetime]$from, [datetime]$to) {
+  if ($to -le $from) { return }
+  $bounds = @($from)
+  $cur = $from.Date.AddDays(1)
+  while ($cur -lt $to) { $bounds += $cur; $cur = $cur.AddDays(1) }
+  $bounds += $to
+  for ($i = 0; $i -lt $bounds.Count - 1; $i++) {
+    $a = $bounds[$i]; $b = $bounds[$i + 1]
+    $sec = [int][Math]::Round(($b - $a).TotalSeconds)
+    if ($sec -lt 1) { continue }
+    $k = Ensure-Day $state $a
+    $day = $state.days.$k
+    $list = @($day.off)
+    $merged = $false
+    if ($list.Count -gt 0) {
+      $last = $list[-1]
+      if (($a - [datetime]::Parse($last.e)).TotalSeconds -le 60) {
+        $last.e = $b.ToString('o'); $last.sec = [int]$last.sec + $sec
+        $day.off = $list; $merged = $true
+      }
+    }
+    if (-not $merged) { $day.off = @($list + [pscustomobject]@{ s = $a.ToString('o'); e = $b.ToString('o'); sec = $sec }) }
+  }
+}
+
+# 某一天的离线区间：存下来的 + 正在进行的，而且只算和「屏幕亮着」重叠的部分。
+# 只取离线区间本身的话，睡眠那段也会被算成离线，跟屏幕总时长对不上。
+function Get-DayOfflineRanges($state, $d) {
+  $k = Get-DayKey $d
+  $dayStart = $d.Date; $dayEnd = $dayStart.AddDays(1)
+  $screen = @()
+  if ($state.days.PSObject.Properties[$k]) {
+    foreach ($sg in @($state.days.$k.segments)) {
+      if ($null -eq $sg -or -not $sg.s -or -not $sg.e) { continue }
+      $screen += ,@([datetime]::Parse($sg.s), [datetime]::Parse($sg.e))
+    }
+  }
+  if ($state.current) { $screen += ,@([datetime]::Parse($state.current), (Get-Date)) }
+  $offs = @()
+  if ($state.days.PSObject.Properties[$k]) {
+    foreach ($o in @($state.days.$k.off)) {
+      if ($null -eq $o -or -not $o.s -or -not $o.e) { continue }
+      $offs += ,@([datetime]::Parse($o.s), [datetime]::Parse($o.e))
+    }
+  }
+  if ($state.offline -and $state.offlineFrom) { $offs += ,@([datetime]::Parse($state.offlineFrom), (Get-Date)) }
+  $out = @()
+  foreach ($o in $offs) {
+    $s = [datetime]$o[0]; if ($s -lt $dayStart) { $s = $dayStart }
+    $e = [datetime]$o[1]; if ($e -gt $dayEnd) { $e = $dayEnd }
+    if ($e -le $s) { continue }
+    foreach ($sg in $screen) {
+      $s2 = [datetime]$sg[0]; if ($s2 -lt $s) { $s2 = $s }
+      $e2 = [datetime]$sg[1]; if ($e2 -gt $e) { $e2 = $e }
+      if ($e2 -gt $s2) { $out += [pscustomobject]@{ s = $s2; e = $e2; sec = [int][Math]::Round(($e2 - $s2).TotalSeconds) } }
+    }
+  }
+  return $out
+}
+
+function Get-DayOffline($state, $d) {
+  $sum = [int64]0
+  foreach ($r in @(Get-DayOfflineRanges $state $d)) { $sum += [int64]$r.sec }
+  return $sum
+}
+
+function Get-RangeOffline($state, [datetime]$endDay, [int]$days) {
+  $sum = [int64]0
+  for ($i = 0; $i -lt $days; $i++) { $sum += [int64](Get-DayOffline $state $endDay.AddDays(-$i)) }
+  return $sum
+}
+
+# 开关离线模式：先把当前应用切片收尾（不留跨模式的一段），再切模式；
+# 关掉时把这段离线记进当天的 off 里，屏幕还亮着就重新起一应用切片。
+function Set-OfflineMode($state, [bool]$on, [datetime]$at) {
+  if ([bool]$state.offline -eq $on) { return }
+  Close-AppSlice $state $at
+  if ($on) {
+    $state.offline = $true
+    $state.offlineFrom = $at.ToString('o')
+    Write-Log "离线模式：开（从 $($at.ToString('HH:mm:ss')) 起不计入办公时长）"
+  } else {
+    if ($state.offlineFrom) { Add-OfflineInterval $state ([datetime]::Parse($state.offlineFrom)) $at }
+    $state.offline = $false
+    $state.offlineFrom = $null
+    Write-Log "离线模式：关（$($at.ToString('HH:mm:ss'))）"
+  }
+  if ($state.current -and $script:DisplayOn) { Start-AppSlice $state $at }
 }
 
 # 把一段已经确定结束的时间记到它所属的那一天（同一天里紧邻的两段合并）。
@@ -676,16 +794,24 @@ function Get-RangeFun($state, [datetime]$endDay, [int]$days) {
   return $sum
 }
 
-# 最近 N 天里，按程序汇总
+# 最近 N 天里，按程序汇总。v = 在线（办公/娱乐），o = 离线区间里的运行时长。
 function Get-RangeApps($state, [datetime]$endDay, [int]$days) {
   $acc = @{}
   for ($i = 0; $i -lt $days; $i++) {
     $k = Get-DayKey $endDay.AddDays(-$i)
     if (-not $state.days.PSObject.Properties[$k]) { continue }
-    if (-not $state.days.$k.PSObject.Properties['apps']) { continue }
-    foreach ($p in @($state.days.$k.apps.PSObject.Properties)) {
-      if (-not $acc.ContainsKey($p.Name)) { $acc[$p.Name] = [int64]0 }
-      $acc[$p.Name] += [int64]$p.Value
+    $day = $state.days.$k
+    if ($day.PSObject.Properties['apps']) {
+      foreach ($p in @($day.apps.PSObject.Properties)) {
+        if (-not $acc.ContainsKey($p.Name)) { $acc[$p.Name] = [pscustomobject]@{ v = [int64]0; o = [int64]0 } }
+        $acc[$p.Name].v += [int64]$p.Value
+      }
+    }
+    if ($day.PSObject.Properties['appsOff']) {
+      foreach ($p in @($day.appsOff.PSObject.Properties)) {
+        if (-not $acc.ContainsKey($p.Name)) { $acc[$p.Name] = [pscustomobject]@{ v = [int64]0; o = [int64]0 } }
+        $acc[$p.Name].o += [int64]$p.Value
+      }
     }
   }
   return $acc
@@ -762,9 +888,12 @@ function New-TimeIcon([int]$sec) {
 function Get-TooltipText($state, [datetime]$now) {
   $work = Get-DayWork $state $now
   $fun  = Get-DayFun $state $now
+  $off  = Get-DayOffline $state $now
   $yw   = Get-DayWork $state $now.AddDays(-1)
   $line = "今天：办公 $(Format-HM $work)"
   if ($fun -gt 0) { $line += "`n娱乐 $(Format-HM $fun)" }
+  if ($off -gt 0) { $line += "  离线 $(Format-HM $off)" }
+  if ($state.offline) { $line = "[离线中]`n" + $line }
   $full = "屏幕时间`n$line`n昨天：办公 $(Format-HM $yw)"
   if ($full.Length -le 63) { return $full }
   $mid = "屏幕时间`n今天：办公 $(Format-HM $work)`n昨天：办公 $(Format-HM $yw)"
@@ -789,14 +918,16 @@ function Get-DetailText($state, [datetime]$now) {
     $k = Get-DayKey $d
     $sec = Get-DaySeconds $state $d
     $funSec = Get-DayFun $state $d
-    $workSec = [int64]$sec - [int64]$funSec
+    $offSec = Get-DayOffline $state $d
+    $workSec = [int64]$sec - [int64]$funSec - [int64]$offSec
     if ($workSec -lt 0) { $workSec = 0 }
     $cnt = Get-DaySegmentCount $state $d
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine("【$label】$k")
-    $max3 = [Math]::Max($workSec, $funSec)
+    $max3 = [Math]::Max([Math]::Max($workSec, $funSec), $offSec)
     [void]$sb.AppendLine(("    办公 " + (Format-HM $workSec).PadLeft(13) + "  " + (Format-Bar $workSec $max3)))
     [void]$sb.AppendLine(("    娱乐 " + (Format-HM $funSec).PadLeft(13) + "  " + (Format-Bar $funSec $max3)))
+    [void]$sb.AppendLine(("    离线 " + (Format-HM $offSec).PadLeft(13) + "  " + (Format-Bar $offSec $max3)))
     [void]$sb.AppendLine(("    合计 " + (Format-HM $sec).PadLeft(13)))
     $segs = @()
     if ($state.days.PSObject.Properties[$k]) { $segs = @($state.days.$k.segments) }
@@ -824,46 +955,60 @@ function Get-DetailText($state, [datetime]$now) {
     if ($rows.Count -gt 0) {
       $sorted = @($rows | Sort-Object -Property @{Expression='v';Descending=$true})
       $maxApp = 0
-      foreach ($r in $sorted) { if ([int64]$r.v -gt $maxApp) { $maxApp = [int64]$r.v } }
+      foreach ($r in $sorted) { $totMax = [int64]$r.v + [int64]$r.o; if ($totMax -gt $maxApp) { $maxApp = $totMax } }
       [void]$sb.AppendLine('    按程序分：')
       foreach ($r in $sorted) {
         $tagApp = if (Test-FunApp $r.n) { ' 娱乐' } else { '' }
-        [void]$sb.AppendLine("      " + $r.n.PadRight(18) + (Format-HM $r.v).PadLeft(12) + "  " + (Format-Bar $r.v $maxApp) + $tagApp)
+        $totR = [int64]$r.v + [int64]$r.o
+        $offTag = if ([int64]$r.o -gt 0) { '  离线 ' + (Format-HM $r.o) } else { '' }
+        [void]$sb.AppendLine("      " + $r.n.PadRight(18) + (Format-HM $totR).PadLeft(12) + "  " + (Format-Bar $totR $maxApp) + $tagApp + $offTag)
       }
     }
   }
   # 最后才是近 7 天：今天和昨天放前面
   $r7 = Get-RangeSeconds $state $now 7
   $f7 = Get-RangeFun $state $now 7
-  $w7 = [int64]$r7 - [int64]$f7
+  $o7 = Get-RangeOffline $state $now 7
+  $w7 = [int64]$r7 - [int64]$f7 - [int64]$o7
   if ($w7 -lt 0) { $w7 = 0 }
   $from7 = $now.Date.AddDays(-6).ToString('MM-dd')
   $to7   = $now.Date.ToString('MM-dd')
   [void]$sb.AppendLine('')
   [void]$sb.AppendLine("【近 7 天】$from7 ~ $to7")
-  $max7 = [Math]::Max($w7, $f7)
+  $max7 = [Math]::Max([Math]::Max($w7, $f7), $o7)
   [void]$sb.AppendLine(("    办公 " + (Format-HM $w7).PadLeft(13) + "  " + (Format-Bar $w7 $max7)))
   [void]$sb.AppendLine(("    娱乐 " + (Format-HM $f7).PadLeft(13) + "  " + (Format-Bar $f7 $max7)))
+  [void]$sb.AppendLine(("    离线 " + (Format-HM $o7).PadLeft(13) + "  " + (Format-Bar $o7 $max7)))
   [void]$sb.AppendLine(("    合计 " + (Format-HM $r7).PadLeft(13)))
   $apps7 = Get-RangeApps $state $now 7
   $top = @()
-  foreach ($n in $apps7.Keys) { $top += [pscustomobject]@{ n = $n; v = $apps7[$n] } }
+  foreach ($n in $apps7.Keys) { $top += [pscustomobject]@{ n = $n; v = [int64]$apps7[$n].v; o = [int64]$apps7[$n].o } }
   if ($script:AppStart -and $script:AppName) {
     $live = [int][Math]::Round((New-TimeSpan -Start $script:AppStart -End (Get-Date)).TotalSeconds)
     $found = $false
-    foreach ($t in $top) { if ($t.n -eq $script:AppName) { $t.v += $live; $found = $true } }
-    if (-not $found) { $top += [pscustomobject]@{ n = $script:AppName; v = [int64]$live } }
+    foreach ($t in $top) {
+      if ($t.n -eq $script:AppName) {
+        if ($state.offline) { $t.o += $live } else { $t.v += $live }
+        $found = $true
+      }
+    }
+    if (-not $found) {
+      if ($state.offline) { $top += [pscustomobject]@{ n = $script:AppName; v = [int64]0; o = [int64]$live } }
+      else { $top += [pscustomobject]@{ n = $script:AppName; v = [int64]$live; o = [int64]0 } }
+    }
   }
   if ($top.Count -gt 0) {
-    $top5 = @($top | Sort-Object -Property @{Expression='v';Descending=$true} | Select-Object -First 5)
+    $top5 = @($top | Sort-Object -Property @{Expression={ [int64]$_.v + [int64]$_.o };Descending=$true} | Select-Object -First 5)
     $maxTop = 0
-    foreach ($t in $top5) { if ([int64]$t.v -gt $maxTop) { $maxTop = [int64]$t.v } }
+    foreach ($t in $top5) { $totTop = [int64]$t.v + [int64]$t.o; if ($totTop -gt $maxTop) { $maxTop = $totTop } }
     [void]$sb.AppendLine('    用得最多的前 5 个：')
     $rank = 0
     foreach ($t in $top5) {
       $rank++
       $tagT = if (Test-FunApp $t.n) { ' 娱乐' } else { '' }
-      [void]$sb.AppendLine("      $rank. " + $t.n.PadRight(16) + (Format-HM $t.v).PadLeft(12) + "  " + (Format-Bar $t.v $maxTop) + $tagT)
+      $totT = [int64]$t.v + [int64]$t.o
+      $offT = if ([int64]$t.o -gt 0) { '  离线 ' + (Format-HM $t.o) } else { '' }
+      [void]$sb.AppendLine("      $rank. " + $t.n.PadRight(16) + (Format-HM $totT).PadLeft(12) + "  " + (Format-Bar $totT $maxTop) + $tagT + $offT)
     }
   }
 
@@ -896,6 +1041,7 @@ $script:UiText  = [System.Drawing.Color]::FromArgb(255, 28, 32, 38)
 $script:UiMuted = [System.Drawing.Color]::FromArgb(255, 138, 147, 158)
 $script:UiWork  = [System.Drawing.Color]::FromArgb(255, 45, 108, 223)
 $script:UiFun   = [System.Drawing.Color]::FromArgb(255, 240, 148, 65)
+$script:UiOff   = [System.Drawing.Color]::FromArgb(255, 122, 138, 158)   # 离线段：灰蓝
 $script:UiTrack = [System.Drawing.Color]::FromArgb(255, 232, 236, 241)
 $script:UiHover = [System.Drawing.Color]::FromArgb(255, 240, 148, 65)
 $script:UiLine  = [System.Drawing.Color]::FromArgb(255, 222, 227, 233)
@@ -933,17 +1079,27 @@ function Get-PanelApps($st, [datetime]$now, [int]$rng) {
   if ($rng -eq 2) {
     $map = Get-RangeApps $st $now 7
     $rows = @()
-    foreach ($n in $map.Keys) { $rows += [pscustomobject]@{ n = $n; v = [int64]$map[$n] } }
+    foreach ($n in $map.Keys) { $rows += [pscustomobject]@{ n = $n; v = [int64]$map[$n].v; o = [int64]$map[$n].o } }
   } else {
     $rows = @(Get-DayAppRows $st $now.AddDays(-$rng))
   }
   if ($script:AppStart -and $script:AppName -and $rng -ne 1) {
     $live = [int][Math]::Round((New-TimeSpan -Start $script:AppStart -End (Get-Date)).TotalSeconds)
     $found = $false
-    foreach ($r in $rows) { if ($r.n -eq $script:AppName) { $r.v += $live; $found = $true } }
-    if (-not $found) { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]$live } }
+    foreach ($r in $rows) {
+      if ($r.n -eq $script:AppName) {
+        if ($script:State -and $script:State.offline) { $r.o += $live } else { $r.v += $live }
+        $found = $true
+      }
+    }
+    if (-not $found) {
+      if ($script:State -and $script:State.offline) { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]0; o = [int64]$live } }
+      else { $rows += [pscustomobject]@{ n = $script:AppName; v = [int64]$live; o = [int64]0 } }
+    }
   }
-  return @($rows | Sort-Object -Property @{Expression='v';Descending=$true} | Select-Object -First 6)
+  # 2026-10-15：原来只取前 6 行。今天有 6 个程序时 OpenCode 正好排第 6，
+  # 但它的秒数少、看着像"没被记录"。放宽到 8 行，菜单长的日子也能看全。
+  return @($rows | Sort-Object -Property @{Expression={ [int64]$_.v + [int64]$_.o };Descending=$true} | Select-Object -First 8)
 }
 
 # 自绘面板必须开双缓冲，不然定时重画时整块会闪一下。
@@ -981,13 +1137,16 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $label = '近 7 天'
     $sec    = [int64](Get-RangeSeconds $st $now 7)
     $funSec = [int64](Get-RangeFun $st $now 7)
+    $offSec = [int64](Get-RangeOffline $st $now 7)
   } else {
     $d = $now.AddDays(-$rng)
     $label = if ($rng -eq 0) { '今天' } else { '昨天' }
     $sec    = [int64](Get-DaySeconds $st $d)
     $funSec = [int64](Get-DayFun $st $d)
+    $offSec = [int64](Get-DayOffline $st $d)
   }
-  $workSec = $sec - $funSec
+  # 办公 = 屏幕 − 娱乐 − 离线；离线那段机器在跑，但不计入上班时长
+  $workSec = $sec - $funSec - $offSec
   if ($workSec -lt 0) { $workSec = 0 }
 
   # ---- 顶部三个标签
@@ -1010,19 +1169,50 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $tx += [int]$sz.Width + 18
   }
 
-  # 右上角关闭按钮（这个面板里没有现成的 muted 画刷，自己建一个再释放）
+  # 右上角：离线开关（拨动式，跟面板同一套配色，不做文字按钮）+ 关闭按钮
+  $swW = 42; $swH = 22; $swX = $w - 40 - 6 - $swW; $swY = 8
+  $offOn = [bool]$st.offline
+  $lblTxt = '离线'
+  # 字号跟面板里「屏幕 / 娱乐 / 离线」那一行一致；用居中排版，别让字偏上
+  $lblSz = $g.MeasureString($lblTxt, $script:FSub)
+  $lblX = $swX - 9 - $lblSz.Width
+  $bLbl = New-Object System.Drawing.SolidBrush $(if ($offOn) { $script:UiOff } else { $script:UiMuted })
+  $lblFmt = New-Object System.Drawing.StringFormat
+  $lblFmt.Alignment = [System.Drawing.StringAlignment]::Near
+  $lblFmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+  $lblRect = New-Object System.Drawing.RectangleF ([single]$lblX), ([single]$swY), ([single]($lblSz.Width + 2)), ([single]$swH)
+  $g.DrawString($lblTxt, $script:FSub, $bLbl, $lblRect, $lblFmt)
+  $lblFmt.Dispose()
+  $bLbl.Dispose()
+  # 轨道：关是浅灰描边，开是灰蓝
+  $tkGp = New-RoundRect $swX $swY $swW $swH 11
+  $tkBr = New-Object System.Drawing.SolidBrush $(if ($offOn) { $script:UiOff } else { $script:UiTrack })
+  $g.FillPath($tkBr, $tkGp); $tkBr.Dispose()
+  if (-not $offOn) { $penT = New-Object System.Drawing.Pen $script:UiLine, 1; $g.DrawPath($penT, $tkGp); $penT.Dispose() }
+  # 圆钮：白底 + 极浅投影，位置表示开关状态
+  $knD = $swH - 4
+  $knX = if ($offOn) { $swX + $swW - $knD - 2 } else { $swX + 2 }
+  $knY = $swY + 2
+  $knSh = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(24, 0, 0, 0))
+  $g.FillEllipse($knSh, [single]($knX + 0.5), [single]($knY + 1), [single]$knD, [single]$knD)
+  $knSh.Dispose()
+  $knBr = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+  $g.FillEllipse($knBr, [single]$knX, [single]$knY, [single]$knD, [single]$knD)
+  $knBr.Dispose()
+  $tkGp.Dispose()
+  $script:PanelToggleRect = [pscustomobject]@{ x = ($lblX - 6); y = ($swY - 5); w = (($swX + $swW) - ($lblX - 6)); h = ($swH + 10) }
   $bClose = New-Object System.Drawing.SolidBrush $script:UiMuted
   $g.DrawString('×', $script:FClose, $bClose, ($w - 30), 2)
   $bClose.Dispose()
   $script:PanelCloseRect = [pscustomobject]@{ x = ($w - 40); y = 0; w = 36; h = 34 }
 
   # ---- 大字号时长
-  $big = (Format-HM $sec)
+  $big = (Format-HM $workSec)
   $bBig = New-Object System.Drawing.SolidBrush $script:UiText
   $g.DrawString($big, $script:FTitle, $bBig, 14, 44)
   $szBig = $g.MeasureString($big, $script:FTitle)
   $bSub = New-Object System.Drawing.SolidBrush $script:UiMuted
-  $g.DrawString("办公 $(Format-HM $workSec)   ·   娱乐 $(Format-HM $funSec)", $script:FSub, $bSub, 18, 40 + $szBig.Height)
+  $g.DrawString("屏幕 $(Format-HM $sec)   ·   娱乐 $(Format-HM $funSec)   ·   离线 $(Format-HM $offSec)", $script:FSub, $bSub, 18, 40 + $szBig.Height)
 
   # ---- 办公 / 娱乐 占比条
   $barY = 118; $barX = 16; $barW = $w - 32; $barH = 12
@@ -1030,15 +1220,22 @@ function Draw-Panel($g, [int]$w, [int]$h) {
   $tb = New-Object System.Drawing.SolidBrush $script:UiTrack
   $g.FillPath($tb, $gp); $tb.Dispose(); $gp.Dispose()
   if ($sec -gt 0) {
-    $wW = [single]($barW * $workSec / $sec)
-    if ($wW -gt 0) {
-      $gp = New-RoundRect $barX $barY $wW $barH 6
+    $xW = [single]($barW * $workSec / $sec)
+    if ($xW -gt 0) {
+      $gp = New-RoundRect $barX $barY $xW $barH 6
       $b = New-Object System.Drawing.SolidBrush $script:UiWork
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
     }
-    if ($funSec -gt 0) {
-      $gp = New-RoundRect ($barX + $wW) $barY ([single]($barW - $wW)) $barH 6
+    $xF = [single]($barW * $funSec / $sec)
+    if ($xF -gt 0) {
+      $gp = New-RoundRect ($barX + $xW) $barY $xF $barH 6
       $b = New-Object System.Drawing.SolidBrush $script:UiFun
+      $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+    }
+    $xO = [single]($barW - $xW - $xF)
+    if ($xO -gt 0) {
+      $gp = New-RoundRect ($barX + $xW + $xF) $barY $xO $barH 6
+      $b = New-Object System.Drawing.SolidBrush $script:UiOff
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
     }
   }
@@ -1052,7 +1249,7 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $g.DrawString('（还没有数据）', $script:FTiny, $bSub, 16, $y)
   } else {
     $maxA = 1
-    foreach ($r in $top) { if ($r.v -gt $maxA) { $maxA = [int64]$r.v } }
+    foreach ($r in $top) { $tot = [int64]$r.v + [int64]$r.o; if ($tot -gt $maxA) { $maxA = $tot } }
     foreach ($r in $top) {
       $col = if (Test-FunApp $r.n) { $script:UiFun } else { $script:UiWork }
       $nm = $r.n
@@ -1062,14 +1259,21 @@ function Draw-Panel($g, [int]$w, [int]$h) {
       $gp = New-RoundRect $bx ($y + 3) $bw $bh 4
       $b = New-Object System.Drawing.SolidBrush $script:UiTrack
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
-      $wv = [single]($bw * $r.v / $maxA)
-      if ($wv -gt 0) {
-        $gp = New-RoundRect $bx ($y + 3) $wv $bh 4
+      $totR = [int64]$r.v + [int64]$r.o
+      $xw = [single]($bw * $r.v / $maxA)
+      $xo = [single]($bw * $r.o / $maxA)
+      if ($xw -gt 0) {
+        $gp = New-RoundRect $bx ($y + 3) $xw $bh 4
         $b = New-Object System.Drawing.SolidBrush $col
         $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
       }
+      if ($xo -gt 0) {
+        $gp = New-RoundRect ($bx + $xw) ($y + 3) $xo $bh 4
+        $b = New-Object System.Drawing.SolidBrush $script:UiOff
+        $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+      }
       $bDur = New-Object System.Drawing.SolidBrush $script:UiText
-      $g.DrawString((Format-HM $r.v), $script:FApp, $bDur, ($w - 16 - 66), $y)
+      $g.DrawString((Format-HM $totR), $script:FApp, $bDur, ($w - 16 - 72), $y)
       $bDur.Dispose()
       $y += 24
     }
@@ -1084,9 +1288,13 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $vals = @()
     for ($i = 6; $i -ge 0; $i--) {
       $dd = $now.AddDays(-$i)
-      $v = [int64](Get-DaySeconds $st $dd)
-      $vals += [pscustomobject]@{ d = $dd; v = $v }
-      if ($v -gt $maxD) { $maxD = $v }
+      $vv = [int64](Get-DaySeconds $st $dd)
+      $vf = [int64](Get-DayFun $st $dd)
+      $vo = [int64](Get-DayOffline $st $dd)
+      $vw = $vv - $vf - $vo
+      if ($vw -lt 0) { $vw = 0 }
+      $vals += [pscustomobject]@{ d = $dd; v = $vv; f = $vf; o = $vo; w = $vw }
+      if ($vv -gt $maxD) { $maxD = $vv }
     }
     # 鼠标停在哪根柱子上：那根高亮，并在它上方写出日期和时长
     $hx0 = [int]$script:PanelHoverX
@@ -1101,13 +1309,23 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $i = 0
     foreach ($v in $vals) {
       $bx = 16 + $i * $dayW
-      $bh2 = [int](28 * $v.v / $maxD)
-      if ($bh2 -lt 1 -and $v.v -gt 0) { $bh2 = 1 }
       $hot = ($hotBar -eq $i)
-      $gp = New-RoundRect ($bx + 6) ($baseY + 24 - $bh2) ($dayW - 14) $bh2 3
-      $bc = if ($hot) { $script:UiHover } elseif ($i -eq 6) { $script:UiWork } else { [System.Drawing.Color]::FromArgb(255, 150, 175, 235) }
-      $b = New-Object System.Drawing.SolidBrush $bc
-      $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+      # 三段从下往上堆：办公(蓝) → 娱乐(橙) → 离线(灰蓝)，总高=屏幕时长
+      $yTop = $baseY + 24
+      $segCols = @(
+        @{ n = [int64]$v.w; c = $(if ($i -eq 6 -or $hot) { $script:UiWork } else { [System.Drawing.Color]::FromArgb(255, 150, 175, 235) }) },
+        @{ n = [int64]$v.f; c = $script:UiFun },
+        @{ n = [int64]$v.o; c = $script:UiOff }
+      )
+      foreach ($sc in $segCols) {
+        if ($sc.n -le 0) { continue }
+        $sh = [int](28 * $sc.n / $maxD)
+        if ($sh -lt 1) { $sh = 1 }
+        $gp = New-RoundRect ($bx + 6) ($yTop - $sh) ($dayW - 14) $sh 2
+        $b = New-Object System.Drawing.SolidBrush $(if ($hot) { $script:UiHover } else { $sc.c })
+        $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+        $yTop -= $sh
+      }
       $btxt = New-Object System.Drawing.SolidBrush $(if ($hot) { $script:UiText } else { $script:UiMuted })
       $g.DrawString($v.d.ToString('MM-dd'), $script:FTiny, $btxt, ($bx + 2), ($baseY + 26))
       $btxt.Dispose()
@@ -1115,7 +1333,7 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     }
     if ($hotBar -ge 0) {
       $one = $vals[$hotBar]
-      $htxt = $one.d.ToString('MM-dd') + '  ' + (Format-HM $one.v)
+      $htxt = $one.d.ToString('MM-dd') + '  办公 ' + (Format-HM $one.w) + ' · 离线 ' + (Format-HM $one.o)
       $hb = New-Object System.Drawing.SolidBrush $script:UiText
       $hw = $g.MeasureString($htxt, $script:FTiny).Width
       $hx = 16 + $hotBar * $dayW + ($dayW - $hw) / 2
@@ -1128,17 +1346,19 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $d = $now.AddDays(-$rng)
     $k = Get-DayKey $d
     $segs = @()
-    if ($st.days.PSObject.Properties[$k]) { $segs = @($st.days.$k.segments) }
+    if ($st.days.PSObject.Properties[$k] -and $st.days.$k.PSObject.Properties['segments']) { $segs = @($st.days.$k.segments | Where-Object { $_ -and $_.s -and $_.e }) }
     $gp = New-RoundRect 16 $baseY ($w - 32) 16 4
     $b = New-Object System.Drawing.SolidBrush $script:UiTrack
     $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
     $dayStart = $d.Date
     $span = 86400.0
+    $offRanges = @(Get-DayOfflineRanges $st $d)
     # 鼠标停在时间轴上时：高亮压到的那一段，并显示精确的起止时间
     $hoverX = [int]$script:PanelHoverX
     $hovering = ($hoverX -ge 16 -and $hoverX -le ($w - 16))
     $hoverSeg = $null
     foreach ($sg in $segs) {
+      if ($null -eq $sg -or -not $sg.s -or -not $sg.e) { continue }
       $s0 = [datetime]::Parse($sg.s); $e0 = [datetime]::Parse($sg.e)
       $x1 = 16 + ($s0 - $dayStart).TotalSeconds / $span * ($w - 32)
       $x2 = 16 + ($e0 - $dayStart).TotalSeconds / $span * ($w - 32)
@@ -1147,6 +1367,17 @@ function Draw-Panel($g, [int]$w, [int]$h) {
       if ($isHover) { $hoverSeg = $sg }
       $gp = New-RoundRect ([single]$x1) $baseY ([single]($x2 - $x1)) 16 3
       $b = New-Object System.Drawing.SolidBrush $(if ($isHover) { $script:UiHover } else { $script:UiWork })
+      $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
+    }
+    # 离线段压在时间轴上层：同样一段屏幕时间，离线的那截用灰蓝画出来
+    $hoverOff = $null
+    foreach ($og in $offRanges) {
+      $ox1 = 16 + ($og.s - $dayStart).TotalSeconds / $span * ($w - 32)
+      $ox2 = 16 + ($og.e - $dayStart).TotalSeconds / $span * ($w - 32)
+      if ($ox2 - $ox1 -lt 1.5) { $ox2 = $ox1 + 1.5 }
+      if ($hovering -and $hoverX -ge $ox1 -and $hoverX -le $ox2) { $hoverOff = $og }
+      $gp = New-RoundRect ([single]$ox1) $baseY ([single]($ox2 - $ox1)) 16 3
+      $b = New-Object System.Drawing.SolidBrush $script:UiOff
       $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
     }
     if ($hovering) {
@@ -1161,6 +1392,9 @@ function Draw-Panel($g, [int]$w, [int]$h) {
       if ($hoverSeg) {
         $hs = [datetime]::Parse($hoverSeg.s); $he = [datetime]::Parse($hoverSeg.e)
         $txt = "$($hs.ToString('HH:mm:ss')) – $($he.ToString('HH:mm:ss'))   $(Format-HM ([int]$hoverSeg.sec))"
+      }
+      if ($hoverOff) {
+        $txt = "离线 " + $hoverOff.s.ToString('HH:mm:ss') + ' – ' + $hoverOff.e.ToString('HH:mm:ss') + '   ' + (Format-HM ([int]$hoverOff.sec))
       }
       $btxt = New-Object System.Drawing.SolidBrush $script:UiText
       $tw = $g.MeasureString($txt, $script:FTiny).Width
@@ -1209,6 +1443,15 @@ function Show-Panel($state, [datetime]$now) {
       param($s, $e)
       $cr = $script:PanelCloseRect
       if ($cr -and $e.X -ge $cr.x -and $e.X -le ($cr.x + $cr.w) -and $e.Y -ge $cr.y -and $e.Y -le ($cr.y + $cr.h)) { $s.Close(); return }
+      $tr = $script:PanelToggleRect
+      if ($tr -and $e.X -ge $tr.x -and $e.X -le ($tr.x + $tr.w) -and $e.Y -ge $tr.y -and $e.Y -le ($tr.y + $tr.h)) {
+        Set-OfflineMode $script:State (-not [bool]$script:State.offline) (Get-Date)
+        Save-State $script:State
+        # -Panel 模式没有托盘图标，别在这里炸掉（曾导致面板切换后不重画）
+        if ($script:Ni) { $script:Ni.Text = Get-TooltipText $script:State (Get-Date) }
+        $s.Invalidate()
+        return
+      }
       $script:PanelReady = $true
       foreach ($t in $script:TabRects) {
         if ($e.Y -ge 8 -and $e.Y -le 34 -and $e.X -ge $t.x -and $e.X -le ($t.x + $t.w + 8)) {
@@ -1255,9 +1498,9 @@ function Show-Panel($state, [datetime]$now) {
     })
     $f.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Escape' -or $e.KeyCode -eq 'Space') { $s.Close() } })
     # 关闭方式：**只有点到面板外面才关**。以前挂在 Deactivate 上，一切换焦点就关，
-    # 想看一眼、截个图都来不及。这里每 150 毫秒看一眼鼠标左键是不是按在面板外。
+    # 想看一眼、截个图都来不及。这里每 20 毫秒看一眼鼠标左键是不是按在面板外。
     $script:PanelWatch = New-Object System.Windows.Forms.Timer
-    $script:PanelWatch.Interval = 150
+    $script:PanelWatch.Interval = 20
     $script:PanelWatch.Add_Tick({
       try {
         if (-not $script:PanelForm -or $script:PanelForm.IsDisposed) { $script:PanelWatch.Stop(); return }
@@ -1274,29 +1517,31 @@ function Show-Panel($state, [datetime]$now) {
             }
           }
         } catch {}
-        # 每 13 次心跳（约 2 秒）核一次内容：只有画出来的东西真的变了才重画。
+        # 每 100 次心跳（约 2 秒）核一次内容：只有画出来的东西真的变了才重画。
         # 面板上的数字都按分钟显示，一分钟才跳一次；固定每 2 秒重画纯粹是白画。
         # 程序行跟着 30 秒的心跳换，换程序时这里也立刻看得出来。
         $script:PanelTickN = [int]$script:PanelTickN + 1
-        if (($script:PanelTickN % 13) -eq 0) {
+        if (($script:PanelTickN % 100) -eq 0) {
           $nowP = Get-Date
           $rngP = [int]$script:PanelRange
           if ($rngP -eq 2) {
             $secP = [int64](Get-RangeSeconds $script:State $nowP 7)
             $funP = [int64](Get-RangeFun $script:State $nowP 7)
+            $offP = [int64](Get-RangeOffline $script:State $nowP 7)
           } else {
             $dP = $nowP.AddDays(-$rngP)
             $secP = [int64](Get-DaySeconds $script:State $dP)
             $funP = [int64](Get-DayFun $script:State $dP)
+            $offP = [int64](Get-DayOffline $script:State $dP)
           }
-          $sigP = "$rngP|" + (Format-HM $secP) + "|" + (Format-HM $funP) + "|"
+          $sigP = "$rngP|" + (Format-HM $secP) + "|" + (Format-HM $funP) + "|" + (Format-HM $offP) + "|" + [bool]$script:State.offline + "|"
           if ($rngP -ne 2) {
             # 今天/昨天底下画的是 24 小时时间轴：段的条数或当前段的起点变了，也得重画
             $sigP += [string]$script:State.current + '|'
             $kP = Get-DayKey $dP
             if ($script:State.days.PSObject.Properties[$kP]) { $sigP += [string]@($script:State.days.$kP.segments).Count + '|' }
           }
-          foreach ($ap in @(Get-PanelApps $script:State $nowP $rngP)) { $sigP += $ap.n + ':' + (Format-HM ([int64]$ap.v)) + ';' }
+          foreach ($ap in @(Get-PanelApps $script:State $nowP $rngP)) { $sigP += $ap.n + ':' + (Format-HM ([int64]$ap.v)) + '/' + (Format-HM ([int64]$ap.o)) + ';' }
           if ($sigP -ne [string]$script:PanelSig) { $script:PanelSig = $sigP; $script:PanelForm.Invalidate() }
         }
         # 任务栏/托盘那一带不算「点到别处」：不然点托盘图标开面板时，按下的那一刻就被
@@ -1469,6 +1714,8 @@ if ((Test-Path $StatePath) -and (@($state.days.PSObject.Properties).Count -gt 0)
 }
 
 $script:State = $state
+# 离线是手动开关，进程重启后继续按存档状态走；没记起点就从现在开始算
+if ($script:State.offline -and -not $script:State.offlineFrom) { $script:State.offlineFrom = (Get-Date).ToString('o') }
 $script:IntervalSec = $IntervalSec
 $script:AppName = $null
 $script:AppStart = $null
@@ -1487,6 +1734,7 @@ if ($Once) {
   "今天：$(Format-HM (Get-DaySeconds $state $now))，共 $(Get-DaySegmentCount $state $now) 段"
   "昨天：$(Format-HM (Get-DaySeconds $state $now.AddDays(-1)))"
   "屏幕：$(if ($script:DisplayOn) { '亮着' } else { '灭着' })   当前空闲 $([ScreenTimeWatch]::IdleSeconds()) 秒"
+  "离线模式：$(if ($state.offline) { '开' } else { '关' })   今天离线 $(Format-HM (Get-DayOffline $state $now))   今天办公 $(Format-HM (Get-DayWork $state $now))"
   # 互斥体被占用就说明托盘在跑，这个判断不会误伤自己
   $probe = New-Object System.Threading.Mutex($false, 'Local\screen-time-counter-singleton')
   $busy = -not $probe.WaitOne(0, $false)
