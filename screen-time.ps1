@@ -18,7 +18,7 @@ param(
   [int]$IntervalSec = 30
 )
 
-$ToolVersion = '1.3.0'   # 版本号：第二行注释和 README 开头要跟它一致
+$ToolVersion = '1.3.1'   # 版本号：第二行注释和 README 开头要跟它一致
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'

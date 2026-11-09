@@ -21,7 +21,7 @@ This little tool turns that into a single number in the tray.
 - **No leftovers**: no admin rights, no runtime, no system service; deleting one folder removes it completely.
 - **Easy to read at a glance**: the tray shows today's office time, and the panel breaks it down by program with a 24-hour timeline.
 
-Version 1.3.0 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
+Version 1.3.1 ｜ MIT license (see [LICENSE](LICENSE)) ｜ A personal tool; Windows 10/11; no promise it fits your setup
 
 ---
 
@@ -220,6 +220,7 @@ Nothing else on the system was changed: no registry entries, no services, no ins
 
 ## Version history
 
+- **1.3.1** (2026-11-09) — state files are replaced atomically (File.Replace) and every heartbeat appends to state.journal; on restart the unfinished segment is recovered from the journal, so a suspended machine or a killed process no longer costs a whole day; the backup is refreshed hourly.
 - **1.3.0** (2026-10-19) — manual offline mode: when you leave but the machine keeps running, flip the switch at the top right of the panel; the time is still recorded but no longer counts as office time. The timeline, the 7-day bars and per-program bars mark offline stretches in grey-blue.
 - **1.2** (2026-10-14) — a segment that crosses midnight is now split by day. It used to be filed entirely under the day it started, so using the machine from the evening into the small hours made the new day show almost nothing; app time is split the same way.
 - **1.1** (2026-10-12) — the tray click is now a toggle: click to open, click again to close. The tool can also be asked to exit cleanly from outside, so restarts and updates no longer need a forced kill.
