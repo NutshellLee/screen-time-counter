@@ -2,6 +2,7 @@
 state.json
 state.bak.json
 state.json.corrupt-*.json
+state.journal
 # 按程序分那次迁移留下的旧快照，跟使用记录一样不要提交
 state.json.before-*
 # 你自己那份程序名单不进仓库；要改名单就复制 categories.example.json 成 categories.json

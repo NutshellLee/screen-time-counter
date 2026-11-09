@@ -23,6 +23,7 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $StatePath = Join-Path $Root 'state.json'
 $BakPath   = Join-Path $Root 'state.bak.json'
+$JournalPath = Join-Path $Root 'state.journal'
 $LogPath   = Join-Path $Root 'screen-time.log'
 $CatPath   = Join-Path $Root 'categories.json'
 
@@ -432,6 +433,25 @@ function Load-State {
   }
 }
 
+function Write-Journal([string]$payload) {
+  try {
+    $line = ('{0}|{1}' -f (Get-Date).ToString('o'), $payload)
+    [System.IO.File]::AppendAllText($JournalPath, $line + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  } catch {}
+}
+
+function Get-JournalLast {
+  if (-not (Test-Path $JournalPath)) { return $null }
+  try {
+    $tail = @(Get-Content $JournalPath -Tail 8 -Encoding UTF8)
+    for ($i = $tail.Count - 1; $i -ge 0; $i--) {
+      $p = $tail[$i] -split '\|', 4
+      if ($p.Count -eq 4) { return [pscustomobject]@{ at = [datetime]::Parse($p[0]); current = $p[1]; app = $p[2]; appStart = $p[3] } }
+    }
+  } catch {}
+  return $null
+}
+
 function Save-State($s) {
   try {
     $s.lastTick = (Get-Date).ToString('o')
@@ -442,7 +462,20 @@ function Save-State($s) {
     $s.appStart = if ($script:AppStart) { ([datetime]$script:AppStart).ToString('o') } else { $null }
     $tmp = "$StatePath.tmp"
     [System.IO.File]::WriteAllText($tmp, ($s | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
-    Move-Item -Path $tmp -Destination $StatePath -Force
+    # 原子替换：File.Replace 在 NTFS 上是一次改名，目标要么是旧文件要么是新文件，
+    # 不会出现「文件消失 / 内容被截成空字节」的窗口。Move-Item -Force 是删了再改名，有那个窗口。
+    try {
+      [System.IO.File]::Replace($tmp, $StatePath, $null)
+    } catch {
+      if (Test-Path $StatePath) { Remove-Item $StatePath -Force }
+      [System.IO.File]::Move($tmp, $StatePath)
+    }
+    # 每次心跳追加一条：state.json 坏了也能从这里把正在计的那段捞回来
+    Write-Journal ((@($s.current, $s.appName, $s.appStart) | ForEach-Object { if ($null -eq $_) { '' } else { $_ } }) -join '|')
+    # 备份一小时刷新一次，坏文件最多丢一小时
+    if (-not $script:BakAt -or ((Get-Date) - $script:BakAt).TotalMinutes -ge 60) {
+      try { Copy-Item -Path $StatePath -Destination $BakPath -Force; $script:BakAt = Get-Date } catch {}
+    }
   } catch { Write-Log "保存状态失败：$($_.Exception.Message)" }
 }
 
@@ -1790,11 +1823,31 @@ if ($state.PSObject.Properties['appName'] -and $state.appName -and $state.PSObje
 }
 if ($state.current) {
   $end = if ($state.lastTick) { [datetime]::Parse($state.lastTick) } else { [datetime]::Parse($state.current) }
+  # state.json 坏了会退回旧备份，lastTick 也跟着退回昨天。追加日志里记着「正在计的这一段的起点」，
+  # 起点对得上就说明是同一次会话，可以放心把结束时间推进到日志最后一条，最多丢一个心跳（30 秒）。
+  $j = Get-JournalLast
+  if ($j -and $j.current -and $j.current -eq $state.current -and $j.at -gt $end) {
+    $end = $j.at
+    Write-Log "用追加日志把这段补到 $($end.ToString('HH:mm:ss'))"
+  }
   Close-Segment $state $end
   Write-Log "发现上次未收尾的记录，已按最后心跳时间收在 $($end.ToString('HH:mm:ss'))"
+} elseif ($j = Get-JournalLast) {
+  # 存档里没有未收尾的段（常见于 state.json 坏了、退回到更早的备份），
+  # 但追加日志里还留着「正在计的这一段」的起点：起点在一天内就把它补回来。
+  if ($j.current) {
+    $cs = [datetime]::Parse($j.current)
+    if ($j.at -gt $cs -and ((Get-Date) - $j.at).TotalHours -lt 24) {
+      $state | Add-Member -NotePropertyName current -NotePropertyValue $j.current -Force
+      Close-Segment $state $j.at
+      Write-Log "存档里没有未收尾的段，用追加日志补回 $($cs.ToString('HH:mm:ss')) -> $($j.at.ToString('HH:mm:ss'))"
+    }
+  }
 }
 $script:AppName = $null
 $script:AppStart = $null
+# 收尾之后把心跳时间对齐到现在，否则第一个心跳会把刚起的这一段当成「挂起」
+$state.lastTick = (Get-Date).ToString('o')
 if ($script:DisplayOn) { Start-Segment $state (Get-Date) }
 
 Start-Tray
