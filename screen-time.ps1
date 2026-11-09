@@ -460,6 +460,9 @@ function Save-State($s) {
     if (-not $s.PSObject.Properties['appStart']) { $s | Add-Member -NotePropertyName appStart -NotePropertyValue $null }
     $s.appName  = $script:AppName
     $s.appStart = if ($script:AppStart) { ([datetime]$script:AppStart).ToString('o') } else { $null }
+    # 正在计的这一段也写进存档（起点 + 现在），面板和外部读取都能实时看到，不用等段关闭
+    if (-not $s.PSObject.Properties['live']) { $s | Add-Member -NotePropertyName live -NotePropertyValue $null }
+    $s.live = if ($s.current) { [pscustomobject]@{ s = $s.current; e = (Get-Date).ToString('o') } } else { $null }
     $tmp = "$StatePath.tmp"
     [System.IO.File]::WriteAllText($tmp, ($s | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     # 原子替换：File.Replace 在 NTFS 上是一次改名，目标要么是旧文件要么是新文件，
@@ -482,7 +485,7 @@ function Save-State($s) {
 function Ensure-Day($state, $d) {
   $k = Get-DayKey $d
   if (-not $state.days.PSObject.Properties[$k]) {
-    $state.days | Add-Member -NotePropertyName $k -NotePropertyValue ([pscustomobject]@{ seconds = 0; segments = @(); apps = [pscustomobject]@{}; appsOff = [pscustomobject]@{}; off = @() })
+    $state.days | Add-Member -NotePropertyName $k -NotePropertyValue ([pscustomobject]@{ seconds = 0; segments = @(); apps = [pscustomobject]@{}; appsOff = [pscustomobject]@{}; off = @(); live = $null })
   } else {
     if (-not $state.days.$k.PSObject.Properties['apps'])    { $state.days.$k | Add-Member -NotePropertyName apps    -NotePropertyValue ([pscustomobject]@{}) }
     if (-not $state.days.$k.PSObject.Properties['appsOff']) { $state.days.$k | Add-Member -NotePropertyName appsOff -NotePropertyValue ([pscustomobject]@{}) }
@@ -1380,6 +1383,15 @@ function Draw-Panel($g, [int]$w, [int]$h) {
     $k = Get-DayKey $d
     $segs = @()
     if ($st.days.PSObject.Properties[$k] -and $st.days.$k.PSObject.Properties['segments']) { $segs = @($st.days.$k.segments | Where-Object { $_ -and $_.s -and $_.e }) }
+    # 正在计的那一段也画出来（从存档里的 live 取，跨零点时裁到当天）
+    if ($st.PSObject.Properties['live'] -and $st.live) {
+      try {
+        $ls = [datetime]::Parse($st.live.s); $le = [datetime]::Parse($st.live.e)
+        $cs = if ($ls -lt $d.Date) { $d.Date } else { $ls }
+        $ce = if ($le -gt $d.Date.AddDays(1)) { $d.Date.AddDays(1) } else { $le }
+        if ($ce -gt $cs) { $segs = @($segs + [pscustomobject]@{ s = $cs.ToString('o'); e = $ce.ToString('o'); sec = [int]($ce - $cs).TotalSeconds; live = $true }) }
+      } catch {}
+    }
     $gp = New-RoundRect 16 $baseY ($w - 32) 16 4
     $b = New-Object System.Drawing.SolidBrush $script:UiTrack
     $g.FillPath($b, $gp); $b.Dispose(); $gp.Dispose()
@@ -1571,6 +1583,7 @@ function Show-Panel($state, [datetime]$now) {
           if ($rngP -ne 2) {
             # 今天/昨天底下画的是 24 小时时间轴：段的条数或当前段的起点变了，也得重画
             $sigP += [string]$script:State.current + '|'
+            if ($script:State.PSObject.Properties['live'] -and $script:State.live) { $sigP += [string]$script:State.live.e + '|' }
             $kP = Get-DayKey $dP
             if ($script:State.days.PSObject.Properties[$kP]) { $sigP += [string]@($script:State.days.$kP.segments).Count + '|' }
           }
